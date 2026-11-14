@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# colcon
+build/
+install/
+log/
+
+# editor (local paths)
+.vscode/
