@@ -11,6 +11,7 @@ ros2 run pjt_test1 <실행 파일> [옵션]
 | `read_sensor` | 위치와 툴 힘을 계속 출력 (노이즈 확인) | ✗ |
 | `move_to_teach` | 교시 파일을 골라 저장된 위치로 이동 | ✅ |
 | `measure_teach_force` | 교시 위치마다 이동해서 TCP Z축 힘 측정 | ✅ |
+| `gripper` | RG2 그리퍼 열기 / 닫기 (컨트롤러 DO) | 그리퍼만 |
 
 교시 파일은 [`robot_setting direct_teach`](../robot_setting/README.md#direct_teach)로 만듭니다.
 
@@ -75,6 +76,25 @@ ros2 run pjt_test1 measure_teach_force 파일.json
 - `a`나 번호를 한 번 실행할 때마다 1차, 2차, …로 구분됩니다.
 - 저장 위치: `~/ws_cobot_pjt/force_logs/teach_force_날짜_시간.csv` (`round`, `name`, `fz_tool`, `fz_tool_std`, `fz_base`, 관절 각도, 교시 파일)
 - 툴 무게가 설정되어 있지 않으면 시작할 때 경고합니다. 정지 상태 힘만 재며, 누르면서 재는 압입 측정은 아직 없습니다.
+
+## gripper
+
+```bash
+ros2 run pjt_test1 gripper open                # 열기
+ros2 run pjt_test1 gripper close               # 닫기
+ros2 run pjt_test1 gripper                     # 대화형: o 열기 | c 닫기 | q 종료
+ros2 run pjt_test1 gripper width 40 --modbus   # OnRobot 서비스로 너비 40 mm (아래 참고)
+```
+
+| 방식 | 옵션 | 경로 | 실물 결과 |
+|---|---|---|---|
+| **DO (기본)** | 없음 | 로봇 컨트롤러 DO1/DO2 → 그리퍼 (강의 `grip_test`와 같음) | ✅ 동작 (닫기 후 너비 0.7 mm) |
+| Modbus | `--modbus` | `/onrobot/sendCommand` → OnRobot 드라이버 → Compute Box(192.168.1.1) | ❌ 명령은 전송되지만 그리퍼가 움직이지 않음 |
+
+- DO 방식은 열기/닫기만 됩니다. 닫기는 DO1=ON, DO2=OFF, 열기는 DO1=OFF, DO2=ON입니다.
+- 명령을 보낸 뒤 1초 기다립니다. 그리퍼가 실제로 다 움직였는지는 확인하지 않습니다.
+- `--do`는 예전 옵션 이름이라 붙여도 기본(DO)과 같습니다.
+- **Modbus 방식(`--modbus`)**: 너비 지정이 가능하지만, 이 셀에서는 그리퍼가 DO로 제어되도록 설정된 것으로 보여 동작하지 않았습니다. 시험 중 OnRobot 드라이버 노드가 종료되는 일도 있었고, 그러면 브링업을 다시 실행해야 서비스가 돌아옵니다. 에뮬레이터의 가상 그리퍼는 숫자를 너비가 아니라 관절 각도(rad)로 해석하므로, 에뮬레이터에서 `width`는 RViz 모양이 실제와 다릅니다.
 
 ## 좌표 메모
 
