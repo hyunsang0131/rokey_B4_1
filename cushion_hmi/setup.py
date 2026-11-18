@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'hmi = cushion_hmi.hmi:main',
             'mock_mission = cushion_hmi.mock_mission:main',
+            'order_server = cushion_hmi.order_server:main',
         ],
     },
 )

@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         bridge.status_received.connect(self.on_status)
         bridge.force_received.connect(self.on_force)
         bridge.log_received.connect(self.append_log)
+        bridge.order_config_received.connect(self.on_order_config)
 
         self.link_timer = QTimer(self)
         self.link_timer.timeout.connect(self.refresh_link)
@@ -98,6 +99,15 @@ class MainWindow(QMainWindow):
         # 플로우 단계
         self.state_bar = StateBar()
         v.addWidget(self.state_bar)
+
+        # 브라우저에서 전달된 침대 슬롯 설정
+        order_box = QGroupBox('브라우저 주문 설정')
+        order_layout = QVBoxLayout(order_box)
+        self.order_config_label = QLabel(
+            'HTML에서 슬롯을 선택하고 ADD TO CART를 누르면 여기에 표시됩니다.')
+        self.order_config_label.setWordWrap(True)
+        order_layout.addWidget(self.order_config_label)
+        v.addWidget(order_box)
 
         # 작업자 확인 배너 (수동 단계)
         self.prompt_frame = QFrame()
@@ -198,6 +208,22 @@ class MainWindow(QMainWindow):
         self.plot_box.setTitle('힘–변위 (압입 측정)' if kind == 'depth' else '힘 (정지 측정, 시간축)')
         xs = f'깊이 {x:6.2f} mm' if kind == 'depth' else f'시간 {x:6.2f} s'
         self.readout.setText(f'모듈 M{mid}   {xs}   Fz {fz:7.2f} N')
+
+    def on_order_config(self, d):
+        slots = d.get('slots')
+        if (not isinstance(slots, dict)
+                or set(slots) != {f'Slot {i}' for i in range(1, 7)}
+                or any(
+                    not isinstance(value, str) or value not in P.STIFFNESS_K
+                    for value in slots.values())):
+            self.append_log('[HMI] 잘못된 브라우저 주문 설정을 수신했습니다')
+            return
+        summary = '   '.join(
+            f'{name}: {P.STIFFNESS_K[slots[name]]:g} N/mm' for name in sorted(
+                slots, key=lambda name: int(name.split()[-1])))
+        order_id = d.get('order_id') or 'ID 없음'
+        self.order_config_label.setText(f'주문 {order_id}   |   {summary}')
+        self.append_log(f'[HMI] 브라우저 주문 설정 수신 ({order_id})')
 
     def append_log(self, text):
         self.log.appendPlainText(time.strftime('%H:%M:%S  ') + text)

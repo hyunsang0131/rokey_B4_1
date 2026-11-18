@@ -28,6 +28,10 @@ TOPIC_CMD = '/cushion/cmd'
 TOPIC_STATUS = '/cushion/status'
 TOPIC_FORCE = '/cushion/force'
 TOPIC_LOG = '/cushion/log'
+TOPIC_ORDER_CONFIG = '/cushion/order_config'
+
+# HTML 선택값을 HMI에 표시할 때 사용할 강성값 [N/mm]
+STIFFNESS_K = {'부드러움': 6.2, '단단함': 12.0}
 
 # 연결 판단: 이 시간 동안 status 가 안 오면 끊김으로 본다
 STATUS_TIMEOUT = 2.0

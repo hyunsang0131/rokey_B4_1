@@ -6,6 +6,7 @@
 |---|---|
 | `hmi` | 작업 화면. 모듈 6개 상태, 플로우 단계, 힘-변위 그래프, 작업자 확인, 알람, 로그 |
 | `mock_mission` | 가짜 미션 노드. 플로우차트 순서대로 상태를 바꾸고 모의 측정값을 발행 |
+| `order_server` | 로컬 HTML 주문을 받아 ROS 2로 HMI에 전달 |
 
 HMI는 로봇을 직접 움직이지 않고 `/cushion/*` 토픽으로 미션 노드와만 통신합니다. 그래서 로봇이 움직이는 동안에도 화면이 멈추지 않습니다.
 
@@ -29,6 +30,26 @@ ros2 launch cushion_hmi demo.launch.py
 ros2 run cushion_hmi mock_mission --ros-args -p defects:="[2,5]" -p spares:=2 -p bad_spares:=0
 ros2 run cushion_hmi hmi
 ```
+
+브라우저 주문값을 HMI에 표시하려면 같은 ROS 환경에서 터미널 두 개를 열어 각각 실행합니다.
+
+터미널 1:
+
+```bash
+ros2 run cushion_hmi order_server
+```
+
+터미널 2:
+
+```bash
+ros2 run cushion_hmi hmi
+```
+
+그다음 `bed_ordering.html`을 브라우저에서 열고 여섯 슬롯을 선택해 `ADD TO CART`를 누릅니다.
+`order_server`는 `127.0.0.1:5000`에서만 요청을 받으며, HMI의 "브라우저 주문 설정"에
+주문 번호와 슬롯별 강성값(6.2 또는 12 N/mm)을 표시합니다. HTML과 주문 서버는 슬롯 선택값을
+`부드러움`/`단단함` 문자열로 주고받고, HMI가 화면 표시 시에만 `protocol.py`의 강성값으로
+변환합니다. `/cushion/order_config`의 `slots` 값도 원래 문자열을 유지합니다.
 
 - `defects`: 처음부터 무른 모듈이 들어 있는 슬롯 (결함 모의 실험)
 - `spares`: 선반에 있는 교체용 모듈 수
@@ -55,6 +76,7 @@ ros2 run cushion_hmi hmi
 | `/cushion/status` | 미션 → HMI | 상태, 모듈별 결과, 작업자 확인, 알람. 0.5초마다 발행하며, 2초 동안 안 오면 HMI가 "응답 없음"으로 표시 |
 | `/cushion/force` | 미션 → HMI | 압입 샘플 `{module, z, fz, reset}` |
 | `/cushion/log` | 미션 → HMI | 로그 한 줄 |
+| `/cushion/order_config` | 로컬 주문 서버 → HMI | 브라우저 주문 번호와 6개 슬롯 설정 |
 
 실제 미션 노드를 만들 때는 `protocol.py`를 import 해서 같은 형식으로 발행하면 HMI를 고치지 않고 그대로 쓸 수 있습니다. `mock_mission.py`의 구조(제너레이터로 만든 상태 머신)를 출발점으로 삼으면 됩니다.
 
@@ -65,6 +87,7 @@ cushion_hmi/
 ├─ cushion_hmi/
 │  ├─ protocol.py      # 토픽 이름, 상태·모드 목록, 모듈 배치, JSON 형식
 │  ├─ ros_bridge.py    # rclpy 를 QThread 에서 돌리고 Qt 시그널로 전달
+│  ├─ order_server.py  # HTML 주문 HTTP 수신 및 ROS 토픽 전달
 │  ├─ widgets.py       # 모듈 격자, 단계 표시줄, 힘-변위 그래프
 │  ├─ hmi.py           # 메인 창 (실행 파일 hmi)
 │  └─ mock_mission.py  # 모의 미션 노드 (실행 파일 mock_mission)

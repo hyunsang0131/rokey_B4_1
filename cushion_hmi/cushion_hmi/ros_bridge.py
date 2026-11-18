@@ -16,6 +16,7 @@ class RosBridge(QThread):
     status_received = pyqtSignal(dict)
     force_received = pyqtSignal(dict)
     log_received = pyqtSignal(str)
+    order_config_received = pyqtSignal(dict)
 
     def __init__(self, node_name='cushion_hmi'):
         super().__init__()
@@ -25,6 +26,8 @@ class RosBridge(QThread):
         self.node.create_subscription(String, P.TOPIC_STATUS, self._on_status, 10)
         self.node.create_subscription(String, P.TOPIC_FORCE, self._on_force, 100)
         self.node.create_subscription(String, P.TOPIC_LOG, self._on_log, 50)
+        self.node.create_subscription(
+            String, P.TOPIC_ORDER_CONFIG, self._on_order_config, 10)
 
     # --- ROS 콜백 (이 QThread 안에서 실행) ---
     def _on_status(self, msg):
@@ -39,6 +42,11 @@ class RosBridge(QThread):
 
     def _on_log(self, msg):
         self.log_received.emit(msg.data)
+
+    def _on_order_config(self, msg):
+        d = P.decode(msg.data)
+        if d is not None:
+            self.order_config_received.emit(d)
 
     def run(self):
         while self._running and rclpy.ok():

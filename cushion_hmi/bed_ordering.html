@@ -21,7 +21,7 @@ const BODY_MASS = 70;           // 하중 질량 [kg]
 const G = 9.81;
 const DEFLECTION_EXAGGERATION = 1; // 측면도 처짐 확대 배율 (1 = 실제 비율)
 const SLOT_COUNT = 6;           // 슬롯 1,2 = 구간1 / 3,4 = 구간2 / 5,6 = 구간3
-const HMI_ENDPOINT = "http://127.0.0.1:5000/order";  // HMI가 다른 PC면 그 PC의 IP로 변경 (빈 문자열 = HTTP 전송 생략)
+const HMI_ENDPOINT = "http://127.0.0.1:5000/order";  // 같은 PC의 order_server로 전송
 const STORAGE_KEY = "bedConfig";
 const HMI_CHANNEL = "hmi-bed-config";
 const GALLERY_IMAGES = [];      // 실제 침대 사진 경로 배열. 비어 있으면 임시 이미지 8장 사용
