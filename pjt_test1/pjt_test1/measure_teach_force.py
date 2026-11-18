@@ -19,6 +19,10 @@
 #   - 툴 무게(set_tool)가 설정되어 있지 않으면 그리퍼 무게가 그대로 힘으로 잡힌다.
 #     시작할 때 현재 툴 이름을 보여주고, 없으면 경고한다.
 #   - 이 스크립트는 "그 위치에 멈춰 있을 때"의 힘만 잰다. 누르면서 재는 압입 측정은 별도.
+#
+# HMI 로 보기 (표시 전용, 조작은 이 터미널에서)
+#   다른 터미널에서 같은 ROS_DOMAIN_ID 로  ros2 run cushion_hmi hmi
+#   교시점 1~6 이 HMI 의 M1~M6 으로 표시되고, 샘플마다 Fz 가 시간 그래프로 그려진다 (hmi_link.py).
 
 import csv
 import json
@@ -31,6 +35,7 @@ import rclpy
 from rclpy.utilities import remove_ros_args
 import DR_init
 
+from pjt_test1.hmi_link import HmiLink
 from pjt_test1.move_to_teach import (
     ROBOT_ID, STATE_NAMES, STATE_STANDBY, choose_file, fmt, print_points,
 )
@@ -102,25 +107,31 @@ def main(args=None):
         while not cli.wait_for_service(timeout_sec=1.0):
             log.info(f'Waiting for service: {cli.srv_name}')
 
-    def report_fault(msg):
+    hmi = HmiLink(node, points)
+
+    def report_fault(msg, idx=None):
         s = get_robot_state()
         log.error(f'{msg}. 상태: {s} {STATE_NAMES.get(s, "UNKNOWN")}')
         a = get_last_alarm()
         if a != -1:
             log.error(f'마지막 알람: level={a.level} group={a.group} index={a.index}')
         log.error('→ 원인 확인 후 robot_setting servo_on 으로 복구하세요.')
+        hmi.failed(idx, f'{msg} (로봇 상태: {STATE_NAMES.get(s, s)})')
 
-    def measure(p):
-        """한 위치로 이동해서 Fz 측정. 결과 dict, 실패하면 None."""
+    def measure(i, p):
+        """i 번째(0부터) 위치로 이동해서 Fz 측정. 결과 dict, 실패하면 None."""
         if get_robot_state() != STATE_STANDBY:
-            report_fault('STANDBY 가 아니라 이동할 수 없습니다')
+            report_fault('STANDBY 가 아니라 이동할 수 없습니다', i)
             return None
+        hmi.begin(i)
         log.info(f'[{p["name"]}] movej → posj={fmt(p["posj"])}')
+        hmi.log(f'[{p["name"]}] 이동')
         if movej(posj(p['posj']), vel=VEL, acc=ACC) != 0:
-            report_fault(f'[{p["name"]}] 이동 실패')
+            report_fault(f'[{p["name"]}] 이동 실패', i)
             return None
 
         time.sleep(SETTLE)
+        hmi.start_sampling(i)
         fz_tool, fz_base = [], []
         for _ in range(SAMPLES):
             ft = get_tool_force(ref=DR_TOOL)
@@ -130,9 +141,11 @@ def main(args=None):
             else:
                 fz_tool.append(ft[2])
                 fz_base.append(fb[2])
+                hmi.sample(i, ft[2])
             time.sleep(SAMPLE_DT)
         if len(fz_tool) < 2:
             log.error(f'[{p["name"]}] 힘을 충분히 읽지 못했습니다')
+            hmi.failed(i, f'[{p["name"]}] 힘을 충분히 읽지 못했습니다')
             return None
 
         r = {'name': p['name'],
@@ -144,6 +157,8 @@ def main(args=None):
              'time': time.strftime('%H:%M:%S')}
         log.info(f'[{p["name"]}] Fz(TCP) = {r["fz_tool"]:.2f} ± {r["fz_tool_std"]:.2f} N'
                  f'   Fz(BASE) = {r["fz_base"]:.2f} N   ({r["n"]}회 평균)')
+        hmi.result(i, r['fz_tool'], r['fz_tool_std'])
+        hmi.log(f'[{p["name"]}] Fz(TCP) = {r["fz_tool"]:.2f} ± {r["fz_tool_std"]:.2f} N')
         return r
 
     results = []
@@ -179,18 +194,22 @@ def main(args=None):
                 round_no += 1
                 print(LINE)
                 print(f'  {round_no}차 측정 (전체 {len(points)}개)')
-                for p in points:
-                    r = measure(p)
+                hmi.log(f'{round_no}차 측정 시작 (전체 {len(points)}개)')
+                for i, p in enumerate(points):
+                    r = measure(i, p)
                     if r is None:
                         break
                     r['round'] = round_no
                     results.append(r)
+                hmi.idle()
                 print_results(results, only_round=round_no)  # 이번 차수만
             elif sel.isdigit() and 1 <= int(sel) <= len(points):
                 round_no += 1
                 print(LINE)
                 print(f'  {round_no}차 측정 (1개)')
-                r = measure(points[int(sel) - 1])
+                hmi.log(f'{round_no}차 측정 시작 ({sel}번)')
+                r = measure(int(sel) - 1, points[int(sel) - 1])
+                hmi.idle()
                 if r is not None:
                     r['round'] = round_no
                     results.append(r)
@@ -217,6 +236,7 @@ def main(args=None):
                                 f'{r["fz_base"]:.3f}', r['n'], r['time'], *r['posj'],
                                 os.path.basename(path)])
             print(f'저장: {fname}')
+        hmi.close()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
