@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>침대 강성 컨피규레이터</title>
+<script>
+/* ============ 설정값: 측정 후 여기만 수정하세요 ============ */
+const COMPANY_NAME = "(주)침대제작소";
+// 실측 강성 [N/mm]
+const STIFFNESS_K = { "부드러움": 6.2, "단단함": 12 };
+const BEAM_LENGTH = 2.0;        // 빔(매트리스) 길이 [m] = 더블베드 길이
+const BED_WIDTH = 1.4;          // 더블베드 폭 [m] (표기용)
+const MATTRESS_THICKNESS = 0.25; // 매트리스 두께 [m]
+const FRAME_HEIGHT = 0.30;      // 바닥~매트리스 하면 높이 [m]
+const HEADBOARD_HEIGHT = 0.9;   // 바닥~헤드보드 상단 높이 [m]
+// N/mm → EI [N·m²] 변환: 스팬 중앙 집중하중 강성 k = 48·EI/L³ 로 가정
+const STIFFNESS_EI = Object.fromEntries(Object.entries(STIFFNESS_K).map(([n, k]) => [n, k * 1000 * BEAM_LENGTH ** 3 / 48]));
+const BODY_LENGTH = 1.7;        // 누운 사람 키 = 하중 분포 길이 [m]
+const BODY_MASS = 70;           // 하중 질량 [kg]
+const G = 9.81;
+const DEFLECTION_EXAGGERATION = 1; // 측면도 처짐 확대 배율 (1 = 실제 비율)
+const SLOT_COUNT = 6;           // 슬롯 1,2 = 구간1 / 3,4 = 구간2 / 5,6 = 구간3
+const HMI_ENDPOINT = "http://127.0.0.1:5000/order";  // HMI가 다른 PC면 그 PC의 IP로 변경 (빈 문자열 = HTTP 전송 생략)
+const STORAGE_KEY = "bedConfig";
+const HMI_CHANNEL = "hmi-bed-config";
+const GALLERY_IMAGES = [];      // 실제 침대 사진 경로 배열. 비어 있으면 임시 이미지 8장 사용
+/* ======================================================== */
+</script>
+<style>
+:root{--bg:#f4f2ef;--surface:#fff;--ink:#1c1b19;--mute:#7a756d;--line:#d8d3cb}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171614;--surface:#211f1c;--ink:#ece7df;--mute:#a29c91;--line:#3a3731}}
+:root[data-theme="dark"]{--bg:#171614;--surface:#211f1c;--ink:#ece7df;--mute:#a29c91;--line:#3a3731}
+:root{box-sizing:border-box;padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 "Helvetica Neue","Noto Sans KR","Apple SD Gothic Neo",sans-serif;font-weight:300}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);background:#1c1b19;z-index:10}
+header{padding:calc(56px + env(safe-area-inset-top,0px)) 24px 56px;color:#fff;background:#4a4742 center/cover;text-align:left}
+header .in,main{max-width:1120px;margin:0 auto}
+header h1{margin:0;font-size:clamp(28px,5vw,48px);font-weight:300;letter-spacing:.28em}
+header p{margin:8px 0 0;opacity:.85;letter-spacing:.06em}
+main{padding:40px 24px 80px}
+.top{display:grid;grid-template-columns:1.15fr 1fr;gap:48px}
+.frame{position:relative;aspect-ratio:4/3;background:var(--surface);border:1px solid var(--line);overflow:hidden}
+.frame img{width:100%;height:100%;object-fit:cover;display:block;cursor:pointer}
+.gbtn{position:absolute;right:12px;bottom:12px;width:44px;height:44px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;display:grid;place-items:center}
+.gbtn[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+.thumbs{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:6px}
+.thumbs button{padding:0;border:1px solid var(--line);background:none;aspect-ratio:1;cursor:pointer;opacity:.55;overflow:hidden}
+.thumbs button.on{opacity:1;outline:2px solid var(--ink);outline-offset:1px}
+.thumbs img{width:100%;height:100%;object-fit:cover;display:block}
+h2{font-weight:300;font-size:22px;margin:0 0 12px;letter-spacing:.04em}
+.lead{color:var(--mute);margin:0 0 32px;max-width:46ch}
+.slots{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;margin:12px 0 28px}
+.slots label{display:block;font-size:13px;color:var(--mute);margin-bottom:4px}
+select{width:100%;padding:11px 10px;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:0}
+.cart{width:100%;padding:15px;font:inherit;letter-spacing:.2em;background:var(--ink);color:var(--bg);border:0;cursor:pointer}
+button:focus-visible,select:focus-visible,.frame img:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.msg{margin:14px 0 0;font-size:13px;color:var(--mute)}
+pre{margin:10px 0 0;padding:12px;background:var(--surface);border:1px solid var(--line);font-size:12px;overflow:auto;max-height:180px}
+.dl{margin-top:8px;padding:8px 14px;font:inherit;font-size:13px;background:none;color:var(--ink);border:1px solid var(--line);cursor:pointer}
+#charts{display:none;grid-template-columns:1fr 1fr;gap:48px;margin-top:56px}
+#charts.open{display:grid}
+.panel{background:var(--surface);border:1px solid var(--line);padding:20px}
+.heat{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cell{aspect-ratio:2/1;display:flex;flex-direction:column;justify-content:center;align-items:center;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.55);font-size:13px;background:var(--line)}
+.cell b{font-weight:500;font-size:15px}
+.legend{margin-top:16px;height:12px;background:linear-gradient(90deg,hsl(240,78%,52%),hsl(180,78%,52%),hsl(120,78%,52%),hsl(60,78%,52%),hsl(0,78%,52%))}
+.lg{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-top:4px}
+svg text{fill:var(--ink);font-family:inherit}
+@media (max-width:860px){.top,#charts{grid-template-columns:1fr;gap:32px}}
+</style>
+</head>
+<body>
+<header><div class="in"><h1 id="co"></h1><p>슬롯별로 단단함을 고르고, 눌림을 미리 확인하세요.</p></div></header>
+<main>
+<section class="top">
+  <div>
+    <div class="frame">
+      <img id="main" alt="침대 사진 (누르면 다음 사진)" tabindex="0">
+      <button class="gbtn" id="gbtn" aria-pressed="false" aria-label="강성 히트맵과 예상 눌림도 보기">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/><path d="M6 16l4-6 3 3 5-8"/></svg>
+      </button>
+    </div>
+    <div class="thumbs" id="thumbs"></div>
+  </div>
+  <div>
+    <h2>제품 소개글</h2>
+    <p class="lead">구간마다 다른 강성을 조합하는 프레임리스 매트리스입니다. 여섯 개 슬롯의 단단함을 직접 선택해 보세요.</p>
+    <h2 style="font-size:16px">침대 슬롯별 단단함을 선택하세요</h2>
+    <div class="slots" id="slots"></div>
+    <button class="cart" id="cart">ADD TO CART</button>
+    <p class="msg" id="status"></p>
+    <pre id="out" hidden></pre>
+    <button class="dl" id="dl" hidden>JSON 다운로드</button>
+  </div>
+</section>
+
+<section id="charts">
+  <div>
+    <h2>강성 히트맵</h2>
+    <div class="panel"><div class="heat" id="heat"></div>
+      <div class="legend"></div><div class="lg"><span>부드러움</span><span>강성 color scheme</span><span>단단함</span></div></div>
+  </div>
+  <div>
+    <h2>예상 눌림도</h2>
+    <div class="panel"><svg id="side" viewBox="0 0 600 315" width="100%" role="img" aria-label="침대 측면 예상 눌림도"></svg></div>
+  </div>
+</section>
+</main>
+
+<script>
+/* ---------- 임시 갤러리 이미지 ---------- */
+const scene = i => {
+  const h = [30,200,150,20,260,90,330,180][i % 8], hb = i % 2 === 0;
+  const s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="hsl(${h},16%,84%)"/><stop offset="1" stop-color="hsl(${h},12%,66%)"/></linearGradient></defs><rect width="800" height="600" fill="url(#g)"/><rect y="450" width="800" height="150" fill="hsl(${h},10%,46%)"/>${hb ? `<rect x="90" y="250" width="40" height="200" rx="6" fill="hsl(${h},14%,32%)"/>` : ""}<rect x="110" y="400" width="590" height="50" fill="hsl(${h},12%,36%)"/><rect x="100" y="320" width="610" height="90" rx="14" fill="hsl(${h},18%,93%)"/><rect x="${150 + i * 10}" y="290" width="150" height="50" rx="22" fill="hsl(${h},14%,98%)"/><text x="400" y="545" text-anchor="middle" font-size="26" fill="#fff" font-family="sans-serif">PHOTO ${i + 1}</text></svg>`;
+  return "data:image/svg+xml," + encodeURIComponent(s);
+};
+const imgs = GALLERY_IMAGES.length ? GALLERY_IMAGES : Array.from({length: 8}, (_, i) => scene(i));
+const $ = s => document.querySelector(s);
+const slotLabels = Array.from({length: SLOT_COUNT}, (_, i) => `Slot ${i + 1}`);
+const ks = Object.values(STIFFNESS_EI), kMin = Math.min(...ks), kMax = Math.max(...ks);
+
+$("#co").textContent = COMPANY_NAME;
+$("header").style.backgroundImage = `linear-gradient(rgba(0,0,0,.45),rgba(0,0,0,.55)),url("${imgs[0]}")`;
+
+/* ---------- 갤러리 ---------- */
+let cur = 0;
+const show = i => {
+  cur = (i + imgs.length) % imgs.length;
+  $("#main").src = imgs[cur];
+  [...$("#thumbs").children].forEach((b, j) => b.classList.toggle("on", j === cur));
+};
+imgs.forEach((src, i) => {
+  const b = document.createElement("button");
+  b.innerHTML = `<img src="${src}" alt="침대 사진 ${i + 1}">`;
+  b.onclick = () => show(i);
+  $("#thumbs").appendChild(b);
+});
+$("#main").onclick = () => show(cur + 1);
+$("#main").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(cur + 1); } };
+show(0);
+
+/* ---------- 슬롯 선택 ---------- */
+slotLabels.forEach((l, i) => {
+  const d = document.createElement("div");
+  d.innerHTML = `<label for="s${i}">${l}</label><select id="s${i}"><option value="" disabled selected>선택</option>${Object.keys(STIFFNESS_EI).map(k => `<option>${k}</option>`).join("")}</select>`;
+  d.querySelector("select").onchange = renderCharts;
+  $("#slots").appendChild(d);
+});
+const getSel = () => slotLabels.map((_, i) => $("#s" + i).value);
+const colorOfK = k => `hsl(${240 * (1 - (kMax === kMin ? .5 : (k - kMin) / (kMax - kMin)))},78%,52%)`;
+
+/* ---------- 백엔드: 딕셔너리 생성 / 저장 / 송신 ---------- */
+let lastCfg = null;
+const buildConfig = sel => Object.fromEntries(slotLabels.map((l, i) => [l, sel[i]]));
+async function addToCart() {
+  const sel = getSel(), st = $("#status");
+  if (sel.some(v => !v)) { st.textContent = "여섯 개 슬롯의 단단함을 모두 선택하세요."; return; }
+  const now = new Date(), pad = n => String(n).padStart(2, "0");
+  const cfg = lastCfg = {
+    order_id: `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`,
+    created_at: now.toISOString(),
+    slots: buildConfig(sel)
+  }, log = [];
+  $("#out").hidden = $("#dl").hidden = false;
+  $("#out").textContent = JSON.stringify(cfg, null, 2);
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); log.push("브라우저 저장 완료"); } catch (e) { log.push("브라우저 저장 실패"); }
+  try { const ch = new BroadcastChannel(HMI_CHANNEL); ch.postMessage(cfg); ch.close(); log.push("같은 기기 HMI 탭에 송신"); } catch (e) {}
+  if (HMI_ENDPOINT) {
+    try {
+      const r = await fetch(HMI_ENDPOINT, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfg)});
+      log.push(r.ok ? "HMI 서버 전송 완료" : "HMI 서버 응답 오류 " + r.status);
+    } catch (e) { log.push("HMI 서버 전송 실패"); }
+  } else log.push("HMI_ENDPOINT 미설정으로 서버 전송은 건너뜀");
+  st.textContent = log.join(" / ");
+}
+$("#cart").onclick = addToCart;
+$("#dl").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(lastCfg, null, 2)], {type: "application/json"}));
+  a.download = "bed_config.json"; a.click();
+};
+
+/* ---------- 빔 해석: 단순지지, 3구간 EI, 중앙 등분포 하중 ---------- */
+function solveBeam(ei3, N = 240) {
+  const L = BEAM_LENGTH, dx = L / N, W = BODY_MASS * G, w = W / BODY_LENGTH, a = (L - BODY_LENGTH) / 2, R = W / 2;
+  const kap = [];
+  for (let i = 0; i <= N; i++) {
+    const x = i * dx, c = Math.min(Math.max(x - a, 0), BODY_LENGTH);
+    const M = R * x - w * c * (x - a - c / 2);
+    kap.push(M / ei3[Math.min(2, Math.floor(x / (L / 3)))]);
+  }
+  const th = [0], y = [0];
+  for (let i = 1; i <= N; i++) th.push(th[i - 1] + (kap[i - 1] + kap[i]) / 2 * dx);
+  for (let i = 1; i <= N; i++) y.push(y[i - 1] + (th[i - 1] + th[i]) / 2 * dx);
+  return y.map((v, i) => -(v - y[N] * i / N));   // 아래 방향 +, 단위 m
+}
+
+/* ---------- 렌더링 ---------- */
+function renderHeat(sel) {
+  $("#heat").innerHTML = sel.map((v, i) => `<div class="cell" style="${v ? `background:${colorOfK(STIFFNESS_EI[v])}` : ""}"><span>${slotLabels[i]}</span><b>${v || "미선택"}</b></div>`).join("");
+}
+function renderSide(sel) {
+  const svg = $("#side");
+  if (sel.some(v => !v)) { svg.innerHTML = `<text x="300" y="135" text-anchor="middle" font-size="14">여섯 슬롯을 모두 선택하면 눌림도가 표시됩니다.</text>`; return; }
+  const ei3 = [0, 1, 2].map(r => (STIFFNESS_EI[sel[2 * r]] + STIFFNESS_EI[sel[2 * r + 1]]) / 2);  // 좌우 슬롯 평균
+  const ys = solveBeam(ei3), N = ys.length - 1, maxD = Math.max(...ys), iMax = ys.indexOf(maxD);
+  const X0 = 60, PPM = 240, FY = 280, YB = FY - FRAME_HEIGHT * PPM, Y0 = YB - MATTRESS_THICKNESS * PPM;
+  const sc = Math.min(DEFLECTION_EXAGGERATION, 0.6 * MATTRESS_THICKNESS / maxD);
+  const P = ys.map((d, i) => [X0 + i / N * BEAM_LENGTH * PPM, Y0 + d * PPM * sc]);
+  const pts = (a, b) => P.slice(a, b + 1).map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const cuts = [0, 1, 2, 3].map(j => Math.round(N * j / 3));
+  const lines = [0, 1, 2].map(j => `<polyline points="${pts(cuts[j], cuts[j + 1])}" fill="none" stroke="${colorOfK(ei3[j])}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
+  const bx = X0 + (BEAM_LENGTH - BODY_LENGTH) / 2 * PPM, bw = BODY_LENGTH * PPM;
+  const arrows = Array.from({length: 7}, (_, i) => { const x = bx + bw * i / 6; return `<path d="M${x},${Y0 - 40} v26 m-4,-6 l4,6 l4,-6" fill="none" stroke="currentColor" stroke-width="1.2"/>`; }).join("");
+  const labels = [0, 1, 2].map(j => `<circle cx="${X0 + (j + .5) / 3 * BEAM_LENGTH * PPM - 30}" cy="298" r="5" fill="${colorOfK(ei3[j])}"/><text x="${X0 + (j + .5) / 3 * BEAM_LENGTH * PPM - 20}" y="302" font-size="12">구간 ${j + 1}</text>`).join("");
+  svg.innerHTML = `<g style="color:var(--ink)">
+    <rect x="28" y="${FY - HEADBOARD_HEIGHT * PPM}" width="26" height="${HEADBOARD_HEIGHT * PPM}" rx="4" fill="var(--ink)" opacity=".75"/>
+    <rect x="${X0 - 6}" y="${YB}" width="${BEAM_LENGTH * PPM + 12}" height="16" fill="var(--line)"/><line x1="20" x2="580" y1="${FY}" y2="${FY}" stroke="var(--line)"/>
+    <rect x="${X0}" y="${YB + 16}" width="10" height="${FY - YB - 16}" fill="var(--line)"/><rect x="${X0 + BEAM_LENGTH * PPM - 10}" y="${YB + 16}" width="10" height="${FY - YB - 16}" fill="var(--line)"/>
+    <path d="M${P[0][0]},${P[0][1]} L${pts(0, N).replace(/^[^ ]+ /, "").split(" ").join(" L")} L${X0 + BEAM_LENGTH * PPM},${YB} L${X0},${YB} Z" fill="var(--bg)" stroke="var(--line)"/>
+    <line x1="${X0}" x2="${X0 + BEAM_LENGTH * PPM}" y1="${Y0}" y2="${Y0}" stroke="var(--mute)" stroke-dasharray="4 4" stroke-width="1"/>
+    ${lines}${arrows}
+    <line x1="${bx}" x2="${bx + bw}" y1="${Y0 - 46}" y2="${Y0 - 46}" stroke="currentColor"/>
+    <text x="${bx + bw / 2}" y="${Y0 - 54}" text-anchor="middle" font-size="12">${BODY_MASS} kg, ${Math.round(BODY_LENGTH * 100)} cm</text>
+    <circle cx="${P[iMax][0]}" cy="${P[iMax][1]}" r="4" fill="var(--ink)"/>
+    <text x="${P[iMax][0]}" y="${P[iMax][1] + 22}" text-anchor="middle" font-size="12">최대 처짐 ${(maxD * 100).toFixed(1)} cm</text>
+    ${labels}
+    <text x="570" y="302" text-anchor="end" font-size="11" opacity=".6">더블 ${Math.round(BEAM_LENGTH * 1000)}×${Math.round(BED_WIDTH * 1000)} mm, 처짐 ×${sc.toFixed(1)} 확대</text></g>`;
+}
+function renderCharts() { const s = getSel(); renderHeat(s); renderSide(s); }
+$("#gbtn").onclick = () => {
+  const open = $("#charts").classList.toggle("open");
+  $("#gbtn").setAttribute("aria-pressed", open);
+  if (open) { renderCharts(); $("#charts").scrollIntoView({behavior: "smooth", block: "start"}); }
+};
+</script>
+</body>
+</html>
