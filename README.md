@@ -2,12 +2,13 @@
 
 두산 **M0609** + **OnRobot RG2**로 실리콘 모듈 매트리스의 쿠션감(강성)을 측정하고, 무른 모듈을 찾아 교체하는 자동화 프로젝트의 ROS 2 코드입니다.
 
-이 저장소에는 지금 **로봇을 노트북에서 다루기 위한 도구**와 **측정 준비용 테스트 코드**가 들어 있습니다.
+이 저장소에는 지금 **로봇을 노트북에서 다루기 위한 도구**, **측정 준비용 테스트 코드**, **작업 화면(HMI)**이 들어 있습니다.
 
 | 패키지 | 역할 | 실행 파일 |
 |---|---|---|
 | [`robot_setting`](robot_setting/README.md) | 티칭 펜던트 기능을 노트북에서 실행 (상태, 서보, 홈, 직접 교시, 툴/TCP) | `status`, `servo_on`, `servo_off`, `home`, `direct_teach`, `tool_tcp` |
 | [`pjt_test1`](pjt_test1/README.md) | 측정 기능 테스트 (센서 읽기, 교시 위치 이동, 위치별 힘 측정) | `read_sensor`, `move_to_teach`, `measure_teach_force` |
+| [`cushion_hmi`](cushion_hmi/README.md) | PyQt5 작업 화면(HMI)과 로봇 없이 시험하는 모의 미션 노드 | `hmi`, `mock_mission` |
 
 ## 환경
 
@@ -23,7 +24,7 @@
 cd ~/ws_cobot_pjt/ws_dsr/src
 git clone https://github.com/hyunsang0131/rokey_B4_1.git
 cd ..
-colcon build --packages-select robot_setting pjt_test1
+colcon build --packages-select robot_setting pjt_test1 cushion_hmi
 source install/setup.bash
 ```
 

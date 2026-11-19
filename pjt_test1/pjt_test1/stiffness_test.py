@@ -2,16 +2,20 @@
 #
 #   ros2 run pjt_test1 stiffness_test                      # 교시 파일 목록에서 선택 (Enter = 기본 파일)
 #   ros2 run pjt_test1 stiffness_test 파일경로.json         # 다른 교시 파일
-#   ros2 run pjt_test1 stiffness_test --approach -30       # 교시 높이에서 빠르게 내려오는 양 [mm] 바꾸기
-#   ros2 run pjt_test1 stiffness_test --target 15          # 목표 힘 [N] 바꾸기 (처음엔 15 권장, 12 미만은 거부)
-#     단단한 큐브는 조금만 들어가서, 목표 힘이 낮으면 5N~목표 구간의 측정 점이 모자라 계산이 안 된다
-#   ros2 run pjt_test1 stiffness_test --modbus             # 그리퍼를 /onrobot/sendCommand 로 (기본은 DO)
+#   ros2 run pjt_test1 stiffness_test --pad                 # 겉감(네오프렌)을 깔았을 때 = --force 30 --from 15 --step 0.25
+#
+#   옵션 (따로 주면 --pad 값보다 우선)
+#     --force 30    최대로 누를 힘 [N]                (기본 20, 12~35)
+#     --from 15     이 힘부터 강성 계산 [N]            (기본 5)  겉감이 눌리는 초반 구간을 뺀다
+#     --step 0.25   닿은 뒤 한 번에 내려가는 깊이 [mm] (기본 0.5) 단단한 큐브의 점 수를 늘린다
+#     --down 30     칸 위에서 빠르게 내려가는 거리 [mm] (기본 40) "이미 닿음"이 뜨면 줄인다
+#     --modbus      그리퍼를 /onrobot/sendCommand 로 (기본은 DO)
 #
 # 측정 방법 (bed_inspect 의 press_at 그대로)
-#   1) 그리퍼를 닫고 칸 위(교시 높이)로 이동 → approach 만큼 빠르게 내려감
+#   1) 그리퍼를 닫고 칸 위(교시 높이)로 이동 → --down 만큼 빠르게 내려감
 #   2) 0.3초 쉬고 힘 15번 평균 = 영점
-#   3) 1mm 씩 내려가다 영점 대비 3N 넘으면 "닿음", 그 뒤 0.5mm 씩 목표 힘까지 누름
-#   4) 5N ~ 목표 힘 구간을 직선으로 맞춰 기울기 = 강성 k [N/mm], 힘 0 지점 = 윗면 높이
+#   3) 1mm 씩 내려가다 영점 대비 3N 넘으면 "닿음", 그 뒤 --step 씩 --force 까지 누름
+#   4) --from ~ --force 구간을 직선으로 맞춰 기울기 = 강성 k [N/mm], 힘 0 지점 = 윗면 높이
 #   5) 누른 채로 두지 않고 교시 높이로 올라옴
 #
 # 화면 명령
@@ -50,6 +54,7 @@ TEACH_DIR = os.path.expanduser('~/ws_cobot_pjt/teach_points')
 DEFAULT_FILE = os.path.join(TEACH_DIR, 'teach_20261117_calc_bed6.json')
 OUT_DIR = os.path.expanduser('~/ws_cobot_pjt/stiffness_test')
 NOISE_SAMPLES = 50
+PAD_PRESET = {'force': 30.0, 'from': 15.0, 'step': 0.25}   # --pad: 겉감(네오프렌)이 있을 때
 LINE = '  ' + '-' * 78
 
 
@@ -133,7 +138,7 @@ def save(results, noise):
             w.writerow([r['time'], r['name'], r['k'], r['z_surf'], r['z0'], r['disp'], r['f_max'],
                         r['r2'], r['error'], r['note']])
     with open(os.path.join(OUT_DIR, f'stiffness_{stamp}_curves.json'), 'w') as f:
-        json.dump({'noise': noise, 'target_N': cfg.F_TARGET,
+        json.dump({'noise': noise, 'target_N': cfg.F_TARGET, 'fit_min_N': cfg.F_FIT_MIN, 'step_mm': cfg.PRESS_STEP,
                    'curves': [{'time': r['time'], 'name': r['name'], 'curve': r['curve']} for r in results]},
                   f, ensure_ascii=False, indent=1)
     return path
@@ -142,10 +147,17 @@ def save(results, noise):
 def main(args=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('file', nargs='?', help='교시 파일 (없으면 목록에서 선택)')
-    ap.add_argument('--approach', type=float, default=cfg.PRESS_APPROACH_DZ,
-                    help=f'교시 높이에서 빠르게 내려오는 양 [mm] (기본 {cfg.PRESS_APPROACH_DZ:g})')
-    ap.add_argument('--target', type=float, default=cfg.F_TARGET,
-                    help=f'목표 힘 [N] (기본 {cfg.F_TARGET:g})')
+    ap.add_argument('--force', '--target', dest='force', type=float, metavar='N',
+                    help=f'최대로 누를 힘 [N] (기본 {cfg.F_TARGET:g})')
+    ap.add_argument('--from', '--fit-min', dest='fit_from', type=float, metavar='N',
+                    help=f'이 힘부터 강성 계산 [N] (기본 {cfg.F_FIT_MIN:g}). 겉감이 있으면 올린다')
+    ap.add_argument('--step', type=float, metavar='MM',
+                    help=f'닿은 뒤 한 번에 내려가는 깊이 [mm] (기본 {cfg.PRESS_STEP:g})')
+    ap.add_argument('--down', type=float, metavar='MM',
+                    help=f'칸 위에서 빠르게 내려가는 거리 [mm] (기본 {-cfg.PRESS_APPROACH_DZ:g})')
+    ap.add_argument('--approach', type=float, help=argparse.SUPPRESS)      # 예전 이름 (음수로 줌)
+    ap.add_argument('--pad', action='store_true',
+                    help='겉감(네오프렌)을 깔았을 때: --force 30 --from 15 --step 0.25 (따로 준 값이 우선)')
     ap.add_argument('--modbus', action='store_true', help='그리퍼를 /onrobot/sendCommand 로 제어')
     opt = ap.parse_args(remove_ros_args(sys.argv)[1:])
 
@@ -163,10 +175,26 @@ def main(args=None):
 
     # 공정과 같은 측정 코드를 쓰되, 이 테스트에 맞게 설정 몇 개만 바꾼다
     cfg.GRIPPER_MODE = 'service' if opt.modbus else 'io'      # 지금 셀은 WebLogic(DO) 로 동작 확인됨
-    cfg.F_TARGET = opt.target
-    if cfg.F_TARGET < 12 or cfg.F_TARGET > cfg.F_LIMIT - 5:
-        print(f'목표 힘은 12 ~ {cfg.F_LIMIT - 5:g}N 사이로 주세요. 강성은 {cfg.F_FIT_MIN:g}N~목표 구간으로 계산하는데, '
-              '목표가 낮으면 단단한 큐브에서 측정 점이 모자랍니다.')
+    preset = PAD_PRESET if opt.pad else {}
+    pick = lambda val, key, default: val if val is not None else preset.get(key, default)   # noqa: E731
+    cfg.F_TARGET = pick(opt.force, 'force', cfg.F_TARGET)
+    cfg.F_FIT_MIN = pick(opt.fit_from, 'from', cfg.F_FIT_MIN)
+    cfg.PRESS_STEP = pick(opt.step, 'step', cfg.PRESS_STEP)
+    if opt.down is not None:
+        approach = -abs(opt.down)
+    elif opt.approach is not None:
+        approach = -abs(opt.approach)
+    else:
+        approach = cfg.PRESS_APPROACH_DZ
+    if not 12 <= cfg.F_TARGET <= cfg.F_LIMIT - 5:
+        print(f'--force 는 12 ~ {cfg.F_LIMIT - 5:g}N 사이로 주세요.')
+        return
+    if not cfg.F_CONTACT <= cfg.F_FIT_MIN <= cfg.F_TARGET - 7:
+        print(f'--from 은 {cfg.F_CONTACT:g} ~ {cfg.F_TARGET - 7:g}N 사이로 주세요. 강성은 from~force 구간으로 '
+              '계산하는데, 구간이 좁으면 단단한 큐브에서 측정 점이 모자랍니다.')
+        return
+    if not 0.1 <= cfg.PRESS_STEP <= 1.0:
+        print('--step 은 0.1 ~ 1.0 mm 사이로 주세요.')
         return
 
     rclpy.init(args=args)
@@ -201,7 +229,7 @@ def main(args=None):
         for i in range(n):
             if n > 1:
                 log(f'[{p["name"]}] {i + 1}/{n}회')
-            res = tasks.press_at(p, opt.approach)
+            res = tasks.press_at(p, approach)
             res.update(name=p['name'], time=time.strftime('%H:%M:%S'))
             new.append(res)
         return new
@@ -213,8 +241,9 @@ def main(args=None):
         if bad:
             raise BedError(f'현재 TCP({tcp or "없음"})가 교시 파일과 다릅니다: {bad}. '
                            'TCP 를 맞추거나 파일의 tcp 값을 고치세요.')
-        log(f'TCP {tcp}, 그리퍼 {cfg.GRIPPER_MODE}, 목표 힘 {cfg.F_TARGET:g}N, 접촉 {cfg.F_CONTACT:g}N, '
-            f'접근 {opt.approach:g}mm')
+        log(f'TCP {tcp}, 그리퍼 {cfg.GRIPPER_MODE}, 목표 힘 {cfg.F_TARGET:g}N, 계산 구간 {cfg.F_FIT_MIN:g}~'
+            f'{cfg.F_TARGET:g}N, 스텝 {cfg.PRESS_STEP:g}mm, 접촉 {cfg.F_CONTACT:g}N, 빠르게 내려가기 {-approach:g}mm'
+            + (' (겉감 모드)' if opt.pad else ''))
 
         print(f'\n=== {os.path.basename(path)} ===')
         for i, p in enumerate(points, 1):

@@ -2,12 +2,14 @@
 #
 #   ros2 run pjt_test1 gripper open                  # 열기
 #   ros2 run pjt_test1 gripper close                 # 닫기
-#   ros2 run pjt_test1 gripper                       # 대화형 (o / c / q)
+#   ros2 run pjt_test1 gripper grip                  # DO1·DO2 둘 다 ON → WebLogic 너비 잡기 (62 mm)
+#   ros2 run pjt_test1 gripper                       # 대화형 (o / c / g / q)
 #   ros2 run pjt_test1 gripper width 40 --modbus     # OnRobot 서비스로 너비 40 mm (아래 주의)
 #
 # 제어 방식
 #   기본: 컨트롤러 디지털 출력 DO1/DO2 (강의 grip_test 방식)
-#     - 닫기: DO1=ON, DO2=OFF / 열기: DO1=OFF, DO2=ON
+#     - 닫기: DO1=ON, DO2=OFF / 열기: DO1=OFF, DO2=ON / 너비 잡기: DO1=ON, DO2=ON
+#       (WebLogic: IN1=1,IN2=0 → 10 mm 5 N / IN1=0,IN2=1 → 70 mm 10 N / IN1=1,IN2=1 → 62 mm 20 N)
 #     - 실물에서 동작 확인 (2026-11-15, 닫기 후 Compute Box 너비 0.7 mm)
 #     - 열기/닫기만 가능, 너비 지정 불가
 #   --modbus: /onrobot/sendCommand 서비스 (onrobot_rg_msgs/SetCommand)
@@ -35,7 +37,7 @@ MOVE_WAIT = 1.0  # 명령 후 동작 완료까지 대기 [s]
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
 
-USAGE = '사용법: gripper [open | close] | gripper width <mm> --modbus'
+USAGE = '사용법: gripper [open | close | grip] | gripper width <mm> --modbus'
 
 
 class Gripper:
@@ -77,10 +79,19 @@ class Gripper:
             return False
         return True
 
-    def _do(self, close):
+    def _do(self, close, both=False):
         d = self.dr
-        ok = d.set_digital_output(1, 1 if close else 0) == 0
-        ok = d.set_digital_output(2, 0 if close else 1) == 0 and ok
+        want = {1: 1 if close else 0, 2: 1 if (both or not close) else 0}
+        ok = True
+        # 항상 (0, 0) 을 먼저 거친다. WebLogic 은 입력이 '바뀌는 순간'에 동작을 실행하므로,
+        # 이미 같은 값이 켜져 있으면(예: 닫기 → 닫기, WebLogic 설정을 바꾼 뒤) 다시 실행되지 않는다.
+        # (0, 0) 은 WebLogic 에 동작이 없는 조합이라 거쳐도 안전하다.
+        for idx in (1, 2):
+            ok = d.set_digital_output(idx, 0) == 0 and ok
+        time.sleep(0.1)
+        for idx, val in want.items():
+            if val:
+                ok = d.set_digital_output(idx, val) == 0 and ok
         if not ok:
             self.log.error('set_digital_output 실패')
         return ok
@@ -97,6 +108,16 @@ class Gripper:
         if ok:
             time.sleep(MOVE_WAIT)
             self.log.info('그리퍼 닫기')
+        return ok
+
+    def grip(self):
+        if not self.use_do:
+            self.log.error('grip 은 DO 방식 전용입니다 (--modbus 빼고 실행).')
+            return False
+        ok = self._do(True, both=True)
+        if ok:
+            time.sleep(MOVE_WAIT)
+            self.log.info('그리퍼 너비 잡기 (DO1·DO2 ON, WebLogic 설정 너비)')
         return ok
 
     def width(self, mm):
@@ -116,7 +137,7 @@ class Gripper:
 def interactive(g):
     print('\n=== 그리퍼 ===')
     if g.use_do:
-        print('o: 열기 | c: 닫기 | q: 종료')
+        print('o: 열기 | c: 닫기 | g: 너비 잡기 | q: 종료')
     else:
         print('o: 열기 | c: 닫기 | 숫자: 너비(mm, 0~110) | q: 종료')
     while True:
@@ -127,6 +148,8 @@ def interactive(g):
             g.open()
         elif sel == 'c':
             g.close()
+        elif sel == 'g' and g.use_do:
+            g.grip()
         else:
             try:
                 g.width(float(sel))
@@ -149,6 +172,8 @@ def main(args=None):
             g.open()
         elif words[0] == 'close':
             g.close()
+        elif words[0] == 'grip':
+            g.grip()
         elif words[0] == 'width' and len(words) == 2:
             try:
                 g.width(float(words[1]))
