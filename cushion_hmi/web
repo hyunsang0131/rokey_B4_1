@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TEAMWON | 팀원매트릭스 - 맞춤형 모듈러 매트리스</title>
+  <title>TEAMWON | 맞춤형 모듈러 매트리스</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Google Fonts: Inter & Noto Sans KR -->
+  <!-- Google Fonts: Inter -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <!-- React & ReactDOM CDN -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel Standalone (브라우저 내 JSX 실시간 컴파일용) -->
+  <!-- Babel Standalone -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     body {
-      font-family: 'Inter', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
     }
   </style>
 </head>
@@ -424,7 +424,7 @@
       const [currentOrder, setCurrentOrder] = useState(null);
       const [factoryStepIdx, setFactoryStepIdx] = useState(0);
 
-      // 메인 히어로 자동 슬라이드
+      // 메인 히어로 자동 슬라이드 & 3D 모듈 변화 애니메이션 타이머
       useEffect(() => {
         if (pageView !== 'HOME') return;
         const interval = setInterval(() => {
@@ -441,7 +441,7 @@
         return () => clearInterval(interval);
       }, [pageView]);
 
-      // 주문 후 공정 단계 진행 시뮬레이션
+      // 주문 후 공정 단계 자동 진행 시뮬레이션
       useEffect(() => {
         if (!currentOrder || !showFactoryDrawer) return;
         if (factoryStepIdx >= FACTORY_STAGES.length - 1) return;
@@ -545,7 +545,7 @@
             .toISOString()
             .slice(0, 10)
             .replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`,
-          brand: 'TEAMWON_MATTRESS',
+          brand: 'TEAMWON',
           bed_model: selectedBed.id,
           size: selectedBed.size,
           timestamp: new Date().toISOString(),
@@ -562,7 +562,6 @@
           modules: orderedModules,
         };
 
-        // 브라우저 전역 변수 및 콘솔에도 로봇 연동용 주문 객체 노출
         window.TEAMWON_LATEST_ORDER = payload;
         console.log('[TEAMWON ROBOT ORDER]', payload);
 
@@ -595,7 +594,7 @@
 
       return (
         <div className="min-h-screen bg-white text-[#1A1A1A]">
-          {/* ================= 1. 상단 GNB ================= */}
+          {/* ================= 1. 상단 GNB (시몬스 스타일 2단 화이트 헤더) ================= */}
           <header className="sticky top-0 z-40 bg-white border-b border-[#EAEAEA]">
             <div className="max-w-[1440px] mx-auto px-6 lg:px-12 pt-3 pb-1 flex items-center justify-between text-[11px] text-[#767676]">
               <span className="tracking-wider">
@@ -621,15 +620,13 @@
             </div>
 
             <div className="max-w-[1440px] mx-auto px-6 lg:px-12 h-14 flex items-center justify-between">
+              {/* 메인 TEAMWON 브랜드 로고 (영문 단독 표기) */}
               <button
                 onClick={() => setPageView('HOME')}
-                className="text-left flex items-baseline gap-2.5"
+                className="text-left flex items-center"
               >
-                <span className="text-[22px] font-bold tracking-[0.22em] text-[#111111]">
+                <span className="text-[23px] font-bold tracking-[0.24em] text-[#111111]">
                   TEAMWON
-                </span>
-                <span className="text-[11px] tracking-[0.12em] text-[#767676] hidden sm:inline">
-                  팀원매트릭스
                 </span>
               </button>
 
@@ -693,7 +690,7 @@
                 >
                   <img
                     src="https://images.unsplash.com/photo-1616594039964-ae9021a400a0?auto=format&fit=crop&w=2000&q=90"
-                    alt="팀원매트릭스 메인 침실 화보"
+                    alt="TEAMWON 메인 침실 화보"
                     className="w-full h-full object-cover object-center"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/15 to-transparent" />
@@ -776,7 +773,7 @@
                   </div>
                 </div>
 
-                {/* 좌우 슬라이드 화살표 */}
+                {/* 좌우 슬라이드 전환 화살표 */}
                 <button
                   onClick={() => setHeroSlide((prev) => (prev === 0 ? 1 : 0))}
                   aria-label="이전 슬라이드"
@@ -796,7 +793,7 @@
                   </svg>
                 </button>
 
-                {/* 하단 인디케이터 */}
+                {/* 하단 슬라이드 인디케이터 바 */}
                 <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2">
                   <button
                     onClick={() => setHeroSlide(0)}
@@ -813,7 +810,7 @@
                 </div>
               </section>
 
-              {/* 홈 하단 베스트 컬렉션 */}
+              {/* 홈 하단 베스트 컬렉션 미리보기 */}
               <section className="max-w-[1360px] mx-auto px-6 lg:px-12 py-20">
                 <div className="flex items-end justify-between mb-10">
                   <div>
@@ -821,7 +818,7 @@
                       SIGNATURE COLLECTION
                     </p>
                     <h2 className="text-[26px] font-normal text-[#111111] mt-1">
-                      팀원매트릭스 대표 라인업
+                      TEAMWON 대표 라인업
                     </h2>
                   </div>
                   <button
@@ -878,7 +875,7 @@
               </div>
 
               <div className="mt-8 grid grid-cols-1 lg:grid-cols-12 gap-10">
-                {/* 좌측 필터 */}
+                {/* 좌측 필터 사이드바 */}
                 <aside className="lg:col-span-3 space-y-6">
                   <div className="relative bg-[#93ABB8]/25 flex items-center px-3.5 py-2.5">
                     <input
@@ -894,7 +891,7 @@
                     </svg>
                   </div>
 
-                  {/* 사이즈 필터 */}
+                  {/* 사이즈 아코디언 */}
                   <div className="border-t border-[#E5E5E5] pt-4">
                     <button
                       onClick={() => setOpenFilter((p) => ({ ...p, size: !p.size }))}
@@ -922,7 +919,7 @@
                     )}
                   </div>
 
-                  {/* 타입 필터 */}
+                  {/* 타입 아코디언 */}
                   <div className="border-t border-[#E5E5E5] pt-4">
                     <button
                       onClick={() => setOpenFilter((p) => ({ ...p, type: !p.type }))}
@@ -964,7 +961,7 @@
                   </button>
                 </aside>
 
-                {/* 우측 3열 그리드 */}
+                {/* 우측 3열 제품 그리드 */}
                 <section className="lg:col-span-9 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-7 gap-y-11">
                   {filteredBeds.map((bed) => {
                     const wished = wishlist.includes(bed.id);
@@ -1025,7 +1022,7 @@
             </main>
           )}
 
-          {/* ================= 4. 나만의 침대 만들기 (3D 커스텀 모달) ================= */}
+          {/* ================= 4. 나만의 침대 만들기 (3D 매트리스 커스텀 모달) ================= */}
           {selectedBed && (
             <div className="fixed inset-0 z-50 bg-black/55 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
               <div className="bg-white w-full max-w-[1140px] border border-[#E5E5E5] shadow-2xl overflow-hidden my-auto">
@@ -1040,14 +1037,14 @@
                   </div>
                   <button
                     onClick={() => setSelectedBed(null)}
-                    className="p-2 text-[#555555] hover:text-[#1A1A1A] text-lg"
+                    className="p-2 text-[#555555] hover:text-[#1A1A1A]"
                   >
                     ✕
                   </button>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12">
-                  {/* 좌측 3D 뷰어 */}
+                  {/* 좌측: 3D 매트리스 실시간 뷰어 */}
                   <div className="lg:col-span-7 bg-[#F7F6F2] p-6 sm:p-8 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-[#E5E5E5]">
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                       <div className="text-[12px] text-[#555555]">
@@ -1114,7 +1111,7 @@
                     </div>
                   </div>
 
-                  {/* 우측 옵션 패널 */}
+                  {/* 우측: 선택된 구역 커스텀 설정 패널 */}
                   <div className="lg:col-span-5 p-6 sm:p-8 flex flex-col justify-between space-y-6">
                     <div className="space-y-6">
                       <div>
@@ -1266,7 +1263,7 @@
                     <div className="pt-4 border-t border-[#E5E5E5] flex items-center gap-3">
                       <button
                         onClick={() => handleOpenCustomizer(selectedBed)}
-                        className="px-4 py-3.5 border border-[#CCCCCC] text-[#555555] hover:text-[#1A1A1A] hover:border-[#1A1A1A] text-[13px]"
+                        className="px-4 py-3.5 border border-[#CCCCCC] text-[#555555] hover:text-[#1A1A1A] hover:border-[#1A1A1A]"
                         title="초기화"
                       >
                         ↺
@@ -1313,7 +1310,7 @@
               <div className="bg-white w-full max-w-[560px] border border-[#E5E5E5] p-7 sm:p-9 shadow-2xl">
                 <div className="flex items-center justify-between pb-4 border-b border-[#E5E5E5]">
                   <h3 className="text-[18px] font-bold text-[#1A1A1A]">
-                    팀원매트릭스 6존 쿠션 가이드
+                    TEAMWON 6존 쿠션 가이드
                   </h3>
                   <button
                     onClick={() => setShowGuideModal(false)}
@@ -1498,11 +1495,11 @@
           <footer className="border-t border-[#E5E5E5] bg-[#FAFAFA] mt-20">
             <div className="max-w-[1360px] mx-auto px-6 lg:px-12 py-12 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 text-[12px] text-[#767676]">
               <div>
-                <p className="text-[15px] font-bold tracking-[0.2em] text-[#1A1A1A]">
+                <p className="text-[15px] font-bold tracking-[0.22em] text-[#1A1A1A]">
                   TEAMWON
                 </p>
                 <p className="mt-2">
-                  팀원매트릭스 · 6-Zone Bespoke Modular Mattress System
+                  6-Zone Bespoke Modular Mattress System
                 </p>
               </div>
               <p>© 2026 TEAMWON MATTRESS. All rights reserved.</p>
