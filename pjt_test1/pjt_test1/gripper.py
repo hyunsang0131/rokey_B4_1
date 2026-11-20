@@ -2,14 +2,14 @@
 #
 #   ros2 run pjt_test1 gripper open                  # 열기
 #   ros2 run pjt_test1 gripper close                 # 닫기
-#   ros2 run pjt_test1 gripper grip                  # DO1·DO2 둘 다 ON → WebLogic 너비 잡기 (62 mm)
+#   ros2 run pjt_test1 gripper grip                  # DO1·DO2 둘 다 ON → WebLogic 너비 잡기 (60 mm)
 #   ros2 run pjt_test1 gripper                       # 대화형 (o / c / g / q)
 #   ros2 run pjt_test1 gripper width 40 --modbus     # OnRobot 서비스로 너비 40 mm (아래 주의)
 #
 # 제어 방식
 #   기본: 컨트롤러 디지털 출력 DO1/DO2 (강의 grip_test 방식)
 #     - 닫기: DO1=ON, DO2=OFF / 열기: DO1=OFF, DO2=ON / 너비 잡기: DO1=ON, DO2=ON
-#       (WebLogic: IN1=1,IN2=0 → 10 mm 5 N / IN1=0,IN2=1 → 70 mm 10 N / IN1=1,IN2=1 → 62 mm 20 N)
+#       (WebLogic: IN1=1,IN2=0 → 0 mm 5 N / IN1=0,IN2=1 → 66 mm 10 N / IN1=1,IN2=1 → 60 mm 20 N)
 #     - 실물에서 동작 확인 (2026-11-15, 닫기 후 Compute Box 너비 0.7 mm)
 #     - 열기/닫기만 가능, 너비 지정 불가
 #   --modbus: /onrobot/sendCommand 서비스 (onrobot_rg_msgs/SetCommand)
