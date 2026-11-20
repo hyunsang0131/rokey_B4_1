@@ -1,16 +1,6 @@
-"""Forward browser mattress orders to the HMI through a local HTTP endpoint.
-
-    ros2 run cushion_hmi order_server                                  # 0.0.0.0:5000 (다른 PC 에서도 접속)
-    ros2 run cushion_hmi order_server --ros-args -p host:=127.0.0.1 -p port:=5000   # 이 PC 에서만
-
-브라우저에서 http://<이 PC IP>:5000/ 을 열면 주문 페이지(bed_ordering.html)가 바로 뜨고,
-그 페이지는 같은 주소의 /order 로 주문을 보낸다 (IP 를 HTML 에 적어 넣을 필요 없음).
-다른 곳에 올린 HTML 을 쓸 때는 주소 뒤에 ?hmi=http://<이 PC IP>:5000/order 를 붙인다.
-"""
+"""Forward browser mattress orders to the HMI through a local HTTP endpoint."""
 
 import json
-import os
-import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
@@ -18,42 +8,11 @@ from cushion_hmi import protocol as P
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from std_msgs.msg import String
 
-HOST = os.environ.get('CUSHION_ORDER_HOST', '0.0.0.0')     # 기본: 모든 네트워크에서 받음 (IP 가 달라도 됨)
-PORT = int(os.environ.get('CUSHION_ORDER_PORT', '5000'))
-
-
-def order_page_path():
-    """설치된 bed_ordering.html 경로 (없으면 소스 폴더)."""
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        p = os.path.join(get_package_share_directory('cushion_hmi'), 'bed_ordering.html')
-        if os.path.exists(p):
-            return p
-    except Exception:
-        pass
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bed_ordering.html')
-
-
-def local_ips():
-    """이 PC 의 IP 들 (안내용)."""
-    ips = set()
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))         # 실제로 보내지는 않는다 (경로만 정함)
-        ips.add(s.getsockname()[0])
-        s.close()
-    except OSError:
-        pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
-    except OSError:
-        pass
-    return sorted(ip for ip in ips if not ip.startswith('127.')) or ['127.0.0.1']
+HOST = '127.0.0.1'
+PORT = 5000
 MAX_BODY_SIZE = 16 * 1024
 SLOT_NAMES = [f'Slot {i}' for i in range(1, 7)]
 
@@ -101,22 +60,6 @@ def make_handler(node, publisher):
             if payload:
                 self.wfile.write(payload)
 
-        def do_GET(self):
-            if self.path.split('?')[0] not in ('/', '/bed_ordering.html'):
-                self._send(404, {'error': 'not found'})
-                return
-            try:
-                with open(order_page_path(), 'rb') as f:
-                    page = f.read()
-            except OSError as exc:
-                self._send(500, {'error': f'주문 페이지를 찾을 수 없습니다: {exc}'})
-                return
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(page)))
-            self.end_headers()
-            self.wfile.write(page)
-
         def do_OPTIONS(self):
             if self.path != '/order':
                 self._send(404, {'error': 'not found'})
@@ -149,22 +92,21 @@ def make_handler(node, publisher):
     return OrderHandler
 
 
+def create_order_server(node, publisher):
+    """Create the local HTTP server that publishes browser orders to ROS."""
+    return ThreadingHTTPServer(
+        (HOST, PORT), make_handler(node, publisher))
+
+
 def main(args=None):
     """Run the local HTTP server and publish validated orders to ROS 2."""
     rclpy.init(args=args)
     node = Node('cushion_order_server')
-    host = node.declare_parameter('host', HOST).value
-    port = int(node.declare_parameter('port', PORT).value)
-    # 마지막 주문을 남겨 둔다 (나중에 켠 bed_cmd order 도 받을 수 있게)
-    latch = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-    publisher = node.create_publisher(String, P.TOPIC_ORDER_CONFIG, latch)
-    server = ThreadingHTTPServer((host, port), make_handler(node, publisher))
+    publisher = node.create_publisher(String, P.TOPIC_ORDER_CONFIG, 10)
+    server = create_order_server(node, publisher)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    node.get_logger().info(f'주문 서버 실행: {host}:{port}  (주문 받는 곳 /order)')
-    shown = local_ips() if host in ('0.0.0.0', '') else [host]
-    for ip in shown:
-        node.get_logger().info(f'  주문 페이지: http://{ip}:{port}/   (다른 PC 브라우저에서 이 주소를 연다)')
+    node.get_logger().info(f'주문 서버 실행: http://{HOST}:{PORT}/order')
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

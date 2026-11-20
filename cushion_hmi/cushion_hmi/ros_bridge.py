@@ -23,6 +23,8 @@ class RosBridge(QThread):
         self._running = True
         self.node = Node(node_name)
         self.pub_cmd = self.node.create_publisher(String, P.TOPIC_CMD, 10)
+        self.pub_order_config = self.node.create_publisher(
+            String, P.TOPIC_ORDER_CONFIG, 10)
         self.node.create_subscription(String, P.TOPIC_STATUS, self._on_status, 10)
         self.node.create_subscription(String, P.TOPIC_FORCE, self._on_force, 100)
         self.node.create_subscription(String, P.TOPIC_LOG, self._on_log, 50)

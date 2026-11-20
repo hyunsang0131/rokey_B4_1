@@ -46,7 +46,8 @@ STEP_STATE = {0: 'IDLE', 1: 'INIT', 2: 'MEASURE', 3: 'JUDGE', 4: 'COVER_OPEN', 5
 GRADE_STATUS = {'ok': 'ok', 'warn': 'warn', 'fail': 'defect', 'mismatch': 'mismatch', 'empty': 'empty',
                 'nodata': 'unknown'}
 # 웹 주문 값 → 공정 profile
-ORDER_PROFILE = {'부드러움': 'soft', '단단함': 'hard', 'soft': 'soft', 'hard': 'hard', 'tall': 'tall'}
+ORDER_PROFILE = {'부드러움': 'soft', '단단함': 'hard', '높게': 'tall', 'soft': 'soft', 'hard': 'hard', 'tall': 'tall'}
+PROFILE_KO = {'soft': '부드럽게', 'hard': '단단하게', 'tall': '높게'}
 IDLE_STATES = ('idle', 'done', 'warning', 'stopped')
 
 
@@ -140,9 +141,37 @@ def to_cushion_status(bed, slot_map, order=None, pending=False):
         'source': 'bed_process', 'control': True,
         'step': step, 'step_name': bed.get('step_name') or '', 'detail': bed.get('detail') or '',
     }
+    out['bed_map'], out['tray_map'] = map_cells(bed.get('map'))
     if order:
         out['order'] = {'order_id': order.get('order_id'), 'pending': pending}
     return out
+
+
+def map_cells(m, ratio=0.75):
+    """공정의 강성 맵 → 화면용 칸 목록 [{'type': 'S'|'H'|'T'|'E'|'?', 'k': ...}] (침대, 트레이). 맵이 없으면 None.
+    S/H 는 침대+트레이 강성을 두 무리로 나눠(비율 ratio) 정한다. T = z 로 높다고 판별된 큐브, E = 빈칸."""
+    if not m:
+        return None, None
+    from bed_inspect import bed_math
+    cells = [c for side in ('bed', 'tray') for c in (m.get(side) or [])]
+    thr = bed_math.split_classes([c['k'] for c in cells if c.get('k') and not c.get('tall')], 1.0 / ratio)
+
+    def one(c):
+        if c.get('empty'):
+            t = 'E'
+        elif c.get('tall'):
+            t = 'T'
+        elif c.get('too_soft'):
+            t = 'S'
+        elif c.get('k') and thr:
+            t = 'S' if c['k'] < thr else 'H'
+        elif c.get('k'):
+            t = 'H'
+        else:
+            t = '?'
+        return {'type': t, 'k': c.get('k')}
+    return ([one(c) for c in m['bed']] if m.get('bed') else None,
+            [one(c) for c in m['tray']] if m.get('tray') else None)
 
 
 class CushionBridge:
@@ -260,7 +289,7 @@ class CushionBridge:
             self.order, self.profile = order, profile
             state = (self.bed or {}).get('state')
         self.pub_last.publish(String(data=json.dumps(order, ensure_ascii=False)))
-        text = ', '.join(f'{i + 1}번 {"부드럽게" if p == "soft" else "단단하게"}' for i, p in enumerate(profile))
+        text = ', '.join(f'{i + 1}번 {PROFILE_KO.get(p, p)}' for i, p in enumerate(profile))
         self.say(f'주문 {order.get("order_id")} 받음: {text}')
         if not self.auto_start:
             self.say('자동 시작이 꺼져 있습니다. HMI 에서 "주문대로 구성"을 골라 시작하세요.')

@@ -1,243 +1,1587 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>침대 강성 컨피규레이터</title>
-<script>
-/* ============ 설정값: 측정 후 여기만 수정하세요 ============ */
-const COMPANY_NAME = "(주)침대제작소";
-// 실측 강성 [N/mm]
-const STIFFNESS_K = { "부드러움": 6.2, "단단함": 12 };
-const BEAM_LENGTH = 2.0;        // 빔(매트리스) 길이 [m] = 더블베드 길이
-const BED_WIDTH = 1.4;          // 더블베드 폭 [m] (표기용)
-const MATTRESS_THICKNESS = 0.25; // 매트리스 두께 [m]
-const FRAME_HEIGHT = 0.30;      // 바닥~매트리스 하면 높이 [m]
-const HEADBOARD_HEIGHT = 0.9;   // 바닥~헤드보드 상단 높이 [m]
-// N/mm → EI [N·m²] 변환: 스팬 중앙 집중하중 강성 k = 48·EI/L³ 로 가정
-const STIFFNESS_EI = Object.fromEntries(Object.entries(STIFFNESS_K).map(([n, k]) => [n, k * 1000 * BEAM_LENGTH ** 3 / 48]));
-const BODY_LENGTH = 1.7;        // 누운 사람 키 = 하중 분포 길이 [m]
-const BODY_MASS = 70;           // 하중 질량 [kg]
-const G = 9.81;
-const DEFLECTION_EXAGGERATION = 1; // 측면도 처짐 확대 배율 (1 = 실제 비율)
-const SLOT_COUNT = 6;           // 슬롯 1,2 = 구간1 / 3,4 = 구간2 / 5,6 = 구간3
-// 주문 보낼 곳: ?hmi=주소 를 붙이면 그 주소, order_server 가 띄운 페이지면 같은 서버의 /order, 파일로 열면 이 PC
-const HMI_ENDPOINT = new URLSearchParams(location.search).get("hmi")
-  || (location.protocol.startsWith("http") ? location.origin + "/order" : "http://127.0.0.1:5000/order");
-const STORAGE_KEY = "bedConfig";
-const HMI_CHANNEL = "hmi-bed-config";
-const GALLERY_IMAGES = [];      // 실제 침대 사진 경로 배열. 비어 있으면 임시 이미지 8장 사용
-/* ======================================================== */
-</script>
-<style>
-:root{--bg:#f4f2ef;--surface:#fff;--ink:#1c1b19;--mute:#7a756d;--line:#d8d3cb}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171614;--surface:#211f1c;--ink:#ece7df;--mute:#a29c91;--line:#3a3731}}
-:root[data-theme="dark"]{--bg:#171614;--surface:#211f1c;--ink:#ece7df;--mute:#a29c91;--line:#3a3731}
-:root{box-sizing:border-box;padding-bottom:env(safe-area-inset-bottom,0px)}
-html{scroll-padding-top:env(safe-area-inset-top,0px)}
-*,*::before,*::after{box-sizing:inherit}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 "Helvetica Neue","Noto Sans KR","Apple SD Gothic Neo",sans-serif;font-weight:300}
-body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);background:#1c1b19;z-index:10}
-header{padding:calc(56px + env(safe-area-inset-top,0px)) 24px 56px;color:#fff;background:#4a4742 center/cover;text-align:left}
-header .in,main{max-width:1120px;margin:0 auto}
-header h1{margin:0;font-size:clamp(28px,5vw,48px);font-weight:300;letter-spacing:.28em}
-header p{margin:8px 0 0;opacity:.85;letter-spacing:.06em}
-main{padding:40px 24px 80px}
-.top{display:grid;grid-template-columns:1.15fr 1fr;gap:48px}
-.frame{position:relative;aspect-ratio:4/3;background:var(--surface);border:1px solid var(--line);overflow:hidden}
-.frame img{width:100%;height:100%;object-fit:cover;display:block;cursor:pointer}
-.gbtn{position:absolute;right:12px;bottom:12px;width:44px;height:44px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;display:grid;place-items:center}
-.gbtn[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
-.thumbs{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:6px}
-.thumbs button{padding:0;border:1px solid var(--line);background:none;aspect-ratio:1;cursor:pointer;opacity:.55;overflow:hidden}
-.thumbs button.on{opacity:1;outline:2px solid var(--ink);outline-offset:1px}
-.thumbs img{width:100%;height:100%;object-fit:cover;display:block}
-h2{font-weight:300;font-size:22px;margin:0 0 12px;letter-spacing:.04em}
-.lead{color:var(--mute);margin:0 0 32px;max-width:46ch}
-.slots{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;margin:12px 0 28px}
-.slots label{display:block;font-size:13px;color:var(--mute);margin-bottom:4px}
-select{width:100%;padding:11px 10px;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:0}
-.cart{width:100%;padding:15px;font:inherit;letter-spacing:.2em;background:var(--ink);color:var(--bg);border:0;cursor:pointer}
-button:focus-visible,select:focus-visible,.frame img:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
-.msg{margin:14px 0 0;font-size:13px;color:var(--mute)}
-pre{margin:10px 0 0;padding:12px;background:var(--surface);border:1px solid var(--line);font-size:12px;overflow:auto;max-height:180px}
-.dl{margin-top:8px;padding:8px 14px;font:inherit;font-size:13px;background:none;color:var(--ink);border:1px solid var(--line);cursor:pointer}
-#charts{display:none;grid-template-columns:1fr 1fr;gap:48px;margin-top:56px}
-#charts.open{display:grid}
-.panel{background:var(--surface);border:1px solid var(--line);padding:20px}
-.heat{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.cell{aspect-ratio:2/1;display:flex;flex-direction:column;justify-content:center;align-items:center;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.55);font-size:13px;background:var(--line)}
-.cell b{font-weight:500;font-size:15px}
-.legend{margin-top:16px;height:12px;background:linear-gradient(90deg,hsl(240,78%,52%),hsl(180,78%,52%),hsl(120,78%,52%),hsl(60,78%,52%),hsl(0,78%,52%))}
-.lg{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-top:4px}
-svg text{fill:var(--ink);font-family:inherit}
-@media (max-width:860px){.top,#charts{grid-template-columns:1fr;gap:32px}}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TEAMWON | 맞춤형 모듈러 매트리스</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <!-- React & ReactDOM CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel Standalone -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    }
+  </style>
 </head>
-<body>
-<header><div class="in"><h1 id="co"></h1><p>슬롯별로 단단함을 고르고, 눌림을 미리 확인하세요.</p></div></header>
-<main>
-<section class="top">
-  <div>
-    <div class="frame">
-      <img id="main" alt="침대 사진 (누르면 다음 사진)" tabindex="0">
-      <button class="gbtn" id="gbtn" aria-pressed="false" aria-label="강성 히트맵과 예상 눌림도 보기">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/><path d="M6 16l4-6 3 3 5-8"/></svg>
-      </button>
-    </div>
-    <div class="thumbs" id="thumbs"></div>
-  </div>
-  <div>
-    <h2>제품 소개글</h2>
-    <p class="lead">구간마다 다른 강성을 조합하는 프레임리스 매트리스입니다. 여섯 개 슬롯의 단단함을 직접 선택해 보세요.</p>
-    <h2 style="font-size:16px">침대 슬롯별 단단함을 선택하세요</h2>
-    <div class="slots" id="slots"></div>
-    <button class="cart" id="cart">ADD TO CART</button>
-    <p class="msg" id="status"></p>
-    <pre id="out" hidden></pre>
-    <button class="dl" id="dl" hidden>JSON 다운로드</button>
-  </div>
-</section>
+<body class="bg-white text-[#1A1A1A] antialiased selection:bg-[#1A1A1A] selection:text-white">
+  <div id="root"></div>
 
-<section id="charts">
-  <div>
-    <h2>강성 히트맵</h2>
-    <div class="panel"><div class="heat" id="heat"></div>
-      <div class="legend"></div><div class="lg"><span>부드러움</span><span>강성 color scheme</span><span>단단함</span></div></div>
-  </div>
-  <div>
-    <h2>예상 눌림도</h2>
-    <div class="panel"><svg id="side" viewBox="0 0 600 315" width="100%" role="img" aria-label="침대 측면 예상 눌림도"></svg></div>
-  </div>
-</section>
-</main>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
 
-<script>
-/* ---------- 임시 갤러리 이미지 ---------- */
-const scene = i => {
-  const h = [30,200,150,20,260,90,330,180][i % 8], hb = i % 2 === 0;
-  const s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="hsl(${h},16%,84%)"/><stop offset="1" stop-color="hsl(${h},12%,66%)"/></linearGradient></defs><rect width="800" height="600" fill="url(#g)"/><rect y="450" width="800" height="150" fill="hsl(${h},10%,46%)"/>${hb ? `<rect x="90" y="250" width="40" height="200" rx="6" fill="hsl(${h},14%,32%)"/>` : ""}<rect x="110" y="400" width="590" height="50" fill="hsl(${h},12%,36%)"/><rect x="100" y="320" width="610" height="90" rx="14" fill="hsl(${h},18%,93%)"/><rect x="${150 + i * 10}" y="290" width="150" height="50" rx="22" fill="hsl(${h},14%,98%)"/><text x="400" y="545" text-anchor="middle" font-size="26" fill="#fff" font-family="sans-serif">PHOTO ${i + 1}</text></svg>`;
-  return "data:image/svg+xml," + encodeURIComponent(s);
-};
-const imgs = GALLERY_IMAGES.length ? GALLERY_IMAGES : Array.from({length: 8}, (_, i) => scene(i));
-const $ = s => document.querySelector(s);
-const slotLabels = Array.from({length: SLOT_COUNT}, (_, i) => `Slot ${i + 1}`);
-const ks = Object.values(STIFFNESS_EI), kMin = Math.min(...ks), kMax = Math.max(...ks);
+    // 보유 재고 한도 (딱딱함 6개, 부드러움 2개, 높은 지지 2개)
+    const STOCK_LIMITS = {
+      HARD: 6,
+      SOFT: 2,
+      HIGH: 2,
+    };
 
-$("#co").textContent = COMPANY_NAME;
-$("header").style.backgroundImage = `linear-gradient(rgba(0,0,0,.45),rgba(0,0,0,.55)),url("${imgs[0]}")`;
+    // 침대 라인업 데이터
+    const BED_PRODUCTS = [
+      {
+        id: 'TANGO',
+        name: 'TANGO',
+        subtitle: '시그니처 6존 맞춤 매트리스 & 월넛 프레임',
+        size: 'LK / K',
+        typeLabel: '6-Zone Custom',
+        swatches: ['#4A5D6E', '#EFE6D8'],
+        image: 'https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 2, label: '상체 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, label: '허리 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, label: '허리 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, label: '하체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, label: '하체 우', hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        id: 'LINEA-II',
+        name: 'LINEA-II',
+        subtitle: '듀얼 소프트 숄더 케어 에디션',
+        size: 'K',
+        typeLabel: 'Soft Balance',
+        swatches: ['#EFE6D8', '#4A5D6E'],
+        image: 'https://images.unsplash.com/photo-1616594039964-ae9021a400a0?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '10A', height: 'HIGH' },
+          { cell_id: 2, label: '상체 우', hardness: '10A', height: 'HIGH' },
+          { cell_id: 3, label: '허리 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, label: '허리 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, label: '하체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, label: '하체 우', hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        id: 'ONORE',
+        name: 'ONORE',
+        subtitle: '플랫 아키텍처 모듈형 침대',
+        size: 'K',
+        typeLabel: 'Firm Support',
+        swatches: ['#4A5D6E'],
+        image: 'https://images.unsplash.com/photo-1540518614846-7eded433c457?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 2, label: '상체 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, label: '허리 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, label: '허리 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, label: '하체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, label: '하체 우', hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        id: 'OPIMO-III',
+        name: 'OPIMO-III',
+        subtitle: '인체공학 허리 릴리프 매트리스',
+        size: 'K',
+        typeLabel: 'Lumbar Relief',
+        swatches: ['#EFE6D8', '#4A5D6E'],
+        image: 'https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 2, label: '상체 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, label: '허리 좌', hardness: '10A', height: 'HIGH' },
+          { cell_id: 4, label: '허리 우', hardness: '10A', height: 'HIGH' },
+          { cell_id: 5, label: '하체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, label: '하체 우', hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        id: 'AVVIO',
+        name: 'AVVIO',
+        subtitle: '코냑 레더 헤드보드 & 하이브리드 코어',
+        size: 'K',
+        typeLabel: 'Hybrid Core',
+        swatches: ['#4A5D6E', '#EFE6D8'],
+        image: 'https://images.unsplash.com/photo-1505693314120-0d443867891c?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '10A', height: 'NORMAL' },
+          { cell_id: 2, label: '상체 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, label: '허리 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, label: '허리 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, label: '하체 좌', hardness: '10A', height: 'HIGH' },
+          { cell_id: 6, label: '하체 우', hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        id: 'FAVOLA',
+        name: 'FAVOLA',
+        subtitle: '미니멀 패브릭 프레임 & 독립 쿠션',
+        size: 'SS',
+        typeLabel: 'Compact Custom',
+        swatches: ['#EFE6D8'],
+        image: 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=1000&q=85',
+        defaultPreset: [
+          { cell_id: 1, label: '상체 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 2, label: '상체 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, label: '허리 좌', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, label: '허리 우', hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, label: '하체 좌', hardness: '10A', height: 'HIGH' },
+          { cell_id: 6, label: '하체 우', hardness: '10A', height: 'HIGH' },
+        ],
+      },
+    ];
 
-/* ---------- 갤러리 ---------- */
-let cur = 0;
-const show = i => {
-  cur = (i + imgs.length) % imgs.length;
-  $("#main").src = imgs[cur];
-  [...$("#thumbs").children].forEach((b, j) => b.classList.toggle("on", j === cur));
-};
-imgs.forEach((src, i) => {
-  const b = document.createElement("button");
-  b.innerHTML = `<img src="${src}" alt="침대 사진 ${i + 1}">`;
-  b.onclick = () => show(i);
-  $("#thumbs").appendChild(b);
-});
-$("#main").onclick = () => show(cur + 1);
-$("#main").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(cur + 1); } };
-show(0);
+    // 히어로 슬라이드 쇼케이스용 3D 모듈 변화 프리셋
+    const HERO_DEMO_CONFIGS = [
+      {
+        title: '허리 지지 강화 모드',
+        desc: '상체·허리는 약 12N/mm 탄탄한 지지, 하체는 약 7N/mm 높은 쿠션으로 설계',
+        cells: [
+          { cell_id: 1, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 2, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, hardness: '10A', height: 'HIGH' },
+          { cell_id: 6, hardness: '10A', height: 'HIGH' },
+        ],
+      },
+      {
+        title: '어깨 압력 분산 모드',
+        desc: '어깨 부위만 약 7N/mm 부드러운 롱 쿠션으로 교체하여 체압 완화',
+        cells: [
+          { cell_id: 1, hardness: '10A', height: 'HIGH' },
+          { cell_id: 2, hardness: '10A', height: 'HIGH' },
+          { cell_id: 3, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 5, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+      {
+        title: '좌우 독립 커스텀 모드',
+        desc: '두 사람의 수면 취향에 맞춰 좌·우 강성과 높낮이를 개별 구성',
+        cells: [
+          { cell_id: 1, hardness: '10A', height: 'HIGH' },
+          { cell_id: 2, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 3, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 4, hardness: '10A', height: 'HIGH' },
+          { cell_id: 5, hardness: '40A', height: 'NORMAL' },
+          { cell_id: 6, hardness: '40A', height: 'NORMAL' },
+        ],
+      },
+    ];
 
-/* ---------- 슬롯 선택 ---------- */
-slotLabels.forEach((l, i) => {
-  const d = document.createElement("div");
-  d.innerHTML = `<label for="s${i}">${l}</label><select id="s${i}"><option value="" disabled selected>선택</option>${Object.keys(STIFFNESS_EI).map(k => `<option>${k}</option>`).join("")}</select>`;
-  d.querySelector("select").onchange = renderCharts;
-  $("#slots").appendChild(d);
-});
-const getSel = () => slotLabels.map((_, i) => $("#s" + i).value);
-const colorOfK = k => `hsl(${240 * (1 - (kMax === kMin ? .5 : (k - kMin) / (kMax - kMin)))},78%,52%)`;
+    // 공정 단계
+    const FACTORY_STAGES = [
+      { code: 'STEP 01', name: '주문 데이터 수신 및 셀 검증' },
+      { code: 'STEP 02', name: '매트리스 커버 개방' },
+      { code: 'STEP 03', name: '6존 독립 쿠션 모듈 교체 및 삽입' },
+      { code: 'STEP 04', name: '촉각 센서 강성(약 12N/mm / 약 7N/mm) 전수 검사' },
+      { code: 'STEP 05', name: '커버 체결 및 출고 준비 완료' },
+    ];
 
-/* ---------- 백엔드: 딕셔너리 생성 / 저장 / 송신 ---------- */
-let lastCfg = null;
-const buildConfig = sel => Object.fromEntries(slotLabels.map((l, i) => [l, sel[i]]));
-async function addToCart() {
-  const sel = getSel(), st = $("#status");
-  if (sel.some(v => !v)) { st.textContent = "여섯 개 슬롯의 단단함을 모두 선택하세요."; return; }
-  const now = new Date(), pad = n => String(n).padStart(2, "0");
-  const cfg = lastCfg = {
-    order_id: `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`,
-    created_at: now.toISOString(),
-    slots: buildConfig(sel)
-  }, log = [];
-  $("#out").hidden = $("#dl").hidden = false;
-  $("#out").textContent = JSON.stringify(cfg, null, 2);
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); log.push("브라우저 저장 완료"); } catch (e) { log.push("브라우저 저장 실패"); }
-  try { const ch = new BroadcastChannel(HMI_CHANNEL); ch.postMessage(cfg); ch.close(); log.push("같은 기기 HMI 탭에 송신"); } catch (e) {}
-  if (HMI_ENDPOINT) {
-    try {
-      const r = await fetch(HMI_ENDPOINT, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(cfg)});
-      log.push(r.ok ? "HMI 서버 전송 완료" : "HMI 서버 응답 오류 " + r.status);
-    } catch (e) { log.push("HMI 서버 전송 실패"); }
-  } else log.push("HMI_ENDPOINT 미설정으로 서버 전송은 건너뜀");
-  st.textContent = log.join(" / ");
-}
-$("#cart").onclick = addToCart;
-$("#dl").onclick = () => {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(lastCfg, null, 2)], {type: "application/json"}));
-  a.download = "bed_config.json"; a.click();
-};
+    /**
+     * 6면이 꽉 찬 솔리드 직육면체(Cuboid) 3D 매트리스 모형 컴포넌트
+     */
+    function SolidBed3D({
+      modules,
+      activeCellId,
+      onSelectCell,
+      interactive = true,
+      viewMode = 'quarter',
+      compact = false,
+    }) {
+      const positions = [
+        { id: 1, col: 0, row: 0 },
+        { id: 2, col: 1, row: 0 },
+        { id: 3, col: 0, row: 1 },
+        { id: 4, col: 1, row: 1 },
+        { id: 5, col: 0, row: 2 },
+        { id: 6, col: 1, row: 2 },
+      ];
 
-/* ---------- 빔 해석: 단순지지, 3구간 EI, 중앙 등분포 하중 ---------- */
-function solveBeam(ei3, N = 240) {
-  const L = BEAM_LENGTH, dx = L / N, W = BODY_MASS * G, w = W / BODY_LENGTH, a = (L - BODY_LENGTH) / 2, R = W / 2;
-  const kap = [];
-  for (let i = 0; i <= N; i++) {
-    const x = i * dx, c = Math.min(Math.max(x - a, 0), BODY_LENGTH);
-    const M = R * x - w * c * (x - a - c / 2);
-    kap.push(M / ei3[Math.min(2, Math.floor(x / (L / 3)))]);
-  }
-  const th = [0], y = [0];
-  for (let i = 1; i <= N; i++) th.push(th[i - 1] + (kap[i - 1] + kap[i]) / 2 * dx);
-  for (let i = 1; i <= N; i++) y.push(y[i - 1] + (th[i - 1] + th[i]) / 2 * dx);
-  return y.map((v, i) => -(v - y[N] * i / N));   // 아래 방향 +, 단위 m
-}
+      const getCell = (id) =>
+        modules.find((m) => m.cell_id === id) || {
+          cell_id: id,
+          hardness: '40A',
+          height: 'NORMAL',
+        };
 
-/* ---------- 렌더링 ---------- */
-function renderHeat(sel) {
-  $("#heat").innerHTML = sel.map((v, i) => `<div class="cell" style="${v ? `background:${colorOfK(STIFFNESS_EI[v])}` : ""}"><span>${slotLabels[i]}</span><b>${v || "미선택"}</b></div>`).join("");
-}
-function renderSide(sel) {
-  const svg = $("#side");
-  if (sel.some(v => !v)) { svg.innerHTML = `<text x="300" y="135" text-anchor="middle" font-size="14">여섯 슬롯을 모두 선택하면 눌림도가 표시됩니다.</text>`; return; }
-  const ei3 = [0, 1, 2].map(r => (STIFFNESS_EI[sel[2 * r]] + STIFFNESS_EI[sel[2 * r + 1]]) / 2);  // 좌우 슬롯 평균
-  const ys = solveBeam(ei3), N = ys.length - 1, maxD = Math.max(...ys), iMax = ys.indexOf(maxD);
-  const X0 = 60, PPM = 240, FY = 280, YB = FY - FRAME_HEIGHT * PPM, Y0 = YB - MATTRESS_THICKNESS * PPM;
-  const sc = Math.min(DEFLECTION_EXAGGERATION, 0.6 * MATTRESS_THICKNESS / maxD);
-  const P = ys.map((d, i) => [X0 + i / N * BEAM_LENGTH * PPM, Y0 + d * PPM * sc]);
-  const pts = (a, b) => P.slice(a, b + 1).map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
-  const cuts = [0, 1, 2, 3].map(j => Math.round(N * j / 3));
-  const lines = [0, 1, 2].map(j => `<polyline points="${pts(cuts[j], cuts[j + 1])}" fill="none" stroke="${colorOfK(ei3[j])}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
-  const bx = X0 + (BEAM_LENGTH - BODY_LENGTH) / 2 * PPM, bw = BODY_LENGTH * PPM;
-  const arrows = Array.from({length: 7}, (_, i) => { const x = bx + bw * i / 6; return `<path d="M${x},${Y0 - 40} v26 m-4,-6 l4,6 l4,-6" fill="none" stroke="currentColor" stroke-width="1.2"/>`; }).join("");
-  const labels = [0, 1, 2].map(j => `<circle cx="${X0 + (j + .5) / 3 * BEAM_LENGTH * PPM - 30}" cy="298" r="5" fill="${colorOfK(ei3[j])}"/><text x="${X0 + (j + .5) / 3 * BEAM_LENGTH * PPM - 20}" y="302" font-size="12">구간 ${j + 1}</text>`).join("");
-  svg.innerHTML = `<g style="color:var(--ink)">
-    <rect x="28" y="${FY - HEADBOARD_HEIGHT * PPM}" width="26" height="${HEADBOARD_HEIGHT * PPM}" rx="4" fill="var(--ink)" opacity=".75"/>
-    <rect x="${X0 - 6}" y="${YB}" width="${BEAM_LENGTH * PPM + 12}" height="16" fill="var(--line)"/><line x1="20" x2="580" y1="${FY}" y2="${FY}" stroke="var(--line)"/>
-    <rect x="${X0}" y="${YB + 16}" width="10" height="${FY - YB - 16}" fill="var(--line)"/><rect x="${X0 + BEAM_LENGTH * PPM - 10}" y="${YB + 16}" width="10" height="${FY - YB - 16}" fill="var(--line)"/>
-    <path d="M${P[0][0]},${P[0][1]} L${pts(0, N).replace(/^[^ ]+ /, "").split(" ").join(" L")} L${X0 + BEAM_LENGTH * PPM},${YB} L${X0},${YB} Z" fill="var(--bg)" stroke="var(--line)"/>
-    <line x1="${X0}" x2="${X0 + BEAM_LENGTH * PPM}" y1="${Y0}" y2="${Y0}" stroke="var(--mute)" stroke-dasharray="4 4" stroke-width="1"/>
-    ${lines}${arrows}
-    <line x1="${bx}" x2="${bx + bw}" y1="${Y0 - 46}" y2="${Y0 - 46}" stroke="currentColor"/>
-    <text x="${bx + bw / 2}" y="${Y0 - 54}" text-anchor="middle" font-size="12">${BODY_MASS} kg, ${Math.round(BODY_LENGTH * 100)} cm</text>
-    <circle cx="${P[iMax][0]}" cy="${P[iMax][1]}" r="4" fill="var(--ink)"/>
-    <text x="${P[iMax][0]}" y="${P[iMax][1] + 22}" text-anchor="middle" font-size="12">최대 처짐 ${(maxD * 100).toFixed(1)} cm</text>
-    ${labels}
-    <text x="570" y="302" text-anchor="end" font-size="11" opacity=".6">더블 ${Math.round(BEAM_LENGTH * 1000)}×${Math.round(BED_WIDTH * 1000)} mm, 처짐 ×${sc.toFixed(1)} 확대</text></g>`;
-}
-function renderCharts() { const s = getSel(); renderHeat(s); renderSide(s); }
-$("#gbtn").onclick = () => {
-  const open = $("#charts").classList.toggle("open");
-  $("#gbtn").setAttribute("aria-pressed", open);
-  if (open) { renderCharts(); $("#charts").scrollIntoView({behavior: "smooth", block: "start"}); }
-};
-</script>
+      const rotateTransform =
+        viewMode === 'side'
+          ? 'rotateX(76deg) rotateZ(-82deg)'
+          : 'rotateX(58deg) rotateZ(-36deg)';
+
+      const scaleClass = compact ? 'scale-[0.82] sm:scale-95' : 'scale-95 sm:scale-105';
+
+      return (
+        <div
+          className={`relative w-full ${
+            compact ? 'h-[320px] sm:h-[360px]' : 'h-[360px] sm:h-[420px]'
+          } flex items-center justify-center select-none overflow-hidden`}
+          style={{ perspective: '1200px' }}
+        >
+          <div
+            className={`relative transition-transform duration-700 ease-out ${scaleClass}`}
+            style={{
+              width: '260px',
+              height: '360px',
+              transformStyle: 'preserve-3d',
+              transform: rotateTransform,
+            }}
+          >
+            {/* 바닥 그림자 */}
+            <div
+              className="absolute inset-0 bg-black/20 blur-xl rounded-md"
+              style={{ transform: 'translateZ(-18px) scale(1.06)' }}
+            />
+
+            {/* 원목 침대 베이스 프레임 */}
+            <div
+              className="absolute -inset-3"
+              style={{ transformStyle: 'preserve-3d' }}
+            >
+              <div
+                className="absolute inset-0 bg-[#6D5643] border border-[#544030]"
+                style={{ transform: 'translateZ(0px)' }}
+              />
+              <div
+                className="absolute left-0 right-0 bottom-0 h-[22px] bg-[#523F2F] origin-bottom"
+                style={{ transform: 'rotateX(-90deg)' }}
+              />
+              <div
+                className="absolute top-0 bottom-0 right-0 w-[22px] bg-[#433325] origin-right"
+                style={{ transform: 'rotateY(90deg)' }}
+              />
+              <div
+                className="absolute left-0 right-0 top-0 h-[86px] bg-[#5C4736] border border-[#463527] origin-top flex items-center justify-center"
+                style={{ transform: 'rotateX(-90deg) translateY(-86px)' }}
+              >
+                <span className="text-[10px] tracking-[0.25em] text-white/40 uppercase">
+                  HEADBOARD
+                </span>
+              </div>
+            </div>
+
+            {/* 6개 직육면체 쿠션 블록 */}
+            <div
+              className="relative w-full h-full grid grid-cols-2 grid-rows-3 gap-2 p-1"
+              style={{ transformStyle: 'preserve-3d' }}
+            >
+              {positions.map(({ id }) => {
+                const cell = getCell(id);
+                const isSoft = cell.hardness === '10A';
+                const isHigh = cell.height === 'HIGH';
+                const isSelected = interactive && activeCellId === id;
+
+                const blockHeight = isHigh ? 64 : 38;
+                const topColor = isSoft ? '#F4ECE0' : '#53687A';
+                const frontColor = isSoft ? '#DFD3C0' : '#3E5060';
+                const sideColor = isSoft ? '#C7B8A1' : '#2D3C49';
+                const borderColor = isSelected
+                  ? '#1A1A1A'
+                  : isSoft
+                  ? '#C9BBA6'
+                  : '#364654';
+
+                return (
+                  <div
+                    key={id}
+                    onClick={() => interactive && onSelectCell && onSelectCell(id)}
+                    className={`relative w-full h-full transition-all duration-500 ${
+                      interactive ? 'cursor-pointer' : ''
+                    }`}
+                    style={{ transformStyle: 'preserve-3d' }}
+                  >
+                    {/* 윗면 */}
+                    <div
+                      className="absolute inset-0 flex flex-col items-center justify-center transition-all duration-500"
+                      style={{
+                        backgroundColor: topColor,
+                        border: `${isSelected ? '2.5px' : '1px'} solid ${borderColor}`,
+                        transform: `translateZ(${blockHeight}px)`,
+                        boxShadow: isSelected
+                          ? '0 0 0 2px rgba(255,255,255,0.8) inset'
+                          : 'none',
+                      }}
+                    >
+                      <span
+                        className={`text-[13px] font-bold tracking-tight ${
+                          isSoft ? 'text-[#2C2620]' : 'text-white'
+                        }`}
+                      >
+                        #{id}
+                      </span>
+                      <span
+                        className={`text-[10px] font-medium mt-0.5 ${
+                          isSoft ? 'text-[#6E6254]' : 'text-white/80'
+                        }`}
+                      >
+                        {isSoft ? '약 7N/mm' : '약 12N/mm'}
+                      </span>
+                      {isHigh && (
+                        <span className="mt-1 px-1.5 py-[1px] bg-[#1A1A1A] text-white text-[8px] tracking-wider uppercase">
+                          HIGH
+                        </span>
+                      )}
+                    </div>
+
+                    {/* 앞면 */}
+                    <div
+                      className="absolute left-0 right-0 bottom-0 origin-bottom transition-all duration-500"
+                      style={{
+                        height: `${blockHeight}px`,
+                        backgroundColor: frontColor,
+                        borderLeft: `1px solid ${borderColor}`,
+                        borderRight: `1px solid ${borderColor}`,
+                        borderBottom: `1px solid ${borderColor}`,
+                        transform: 'rotateX(-90deg)',
+                      }}
+                    />
+
+                    {/* 우측면 */}
+                    <div
+                      className="absolute top-0 bottom-0 right-0 origin-right transition-all duration-500"
+                      style={{
+                        width: `${blockHeight}px`,
+                        backgroundColor: sideColor,
+                        borderTop: `1px solid ${borderColor}`,
+                        borderBottom: `1px solid ${borderColor}`,
+                        borderRight: `1px solid ${borderColor}`,
+                        transform: 'rotateY(90deg)',
+                      }}
+                    />
+
+                    {/* 좌측면 */}
+                    <div
+                      className="absolute top-0 bottom-0 left-0 origin-left transition-all duration-500"
+                      style={{
+                        width: `${blockHeight}px`,
+                        backgroundColor: sideColor,
+                        transform: 'rotateY(-90deg)',
+                      }}
+                    />
+
+                    {/* 뒷면 */}
+                    <div
+                      className="absolute left-0 right-0 top-0 origin-top transition-all duration-500"
+                      style={{
+                        height: `${blockHeight}px`,
+                        backgroundColor: frontColor,
+                        transform: 'rotateX(90deg)',
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 시점 범례 */}
+          <div className="absolute bottom-3 left-4 flex items-center gap-4 text-[11px] text-[#555555] bg-white/85 backdrop-blur-sm px-3 py-1.5 border border-[#E5E5E5]">
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 bg-[#53687A] inline-block" />
+              탄탄함 (약 12N/mm)
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 bg-[#F4ECE0] border border-[#C9BBA6] inline-block" />
+              부드러움 (약 7N/mm)
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [pageView, setPageView] = useState('HOME');
+      const [heroSlide, setHeroSlide] = useState(0);
+      const [demoStep, setDemoStep] = useState(0);
+
+      const [searchQuery, setSearchQuery] = useState('');
+      const [selectedSize, setSelectedSize] = useState('ALL');
+      const [selectedType, setSelectedType] = useState('ALL');
+      const [openFilter, setOpenFilter] = useState({ size: true, type: false });
+      const [wishlist, setWishlist] = useState(['TANGO']);
+
+      const [selectedBed, setSelectedBed] = useState(null);
+      const [modules, setModules] = useState(BED_PRODUCTS[0].defaultPreset);
+      const [activeCellId, setActiveCellId] = useState(1);
+      const [viewMode, setViewMode] = useState('quarter');
+      const [showGuideModal, setShowGuideModal] = useState(false);
+
+      const [stockAlertMessage, setStockAlertMessage] = useState('');
+
+      const [showFactoryDrawer, setShowFactoryDrawer] = useState(false);
+      const [currentOrder, setCurrentOrder] = useState(null);
+      const [orderDelivery, setOrderDelivery] = useState(null);
+      const [factoryStepIdx, setFactoryStepIdx] = useState(0);
+
+      // 메인 히어로 자동 슬라이드 & 3D 모듈 변화 애니메이션 타이머
+      useEffect(() => {
+        if (pageView !== 'HOME') return;
+        const interval = setInterval(() => {
+          setDemoStep((prev) => {
+            const next = prev + 1;
+            if (next % 4 === 0) {
+              setHeroSlide(0);
+            } else {
+              setHeroSlide(1);
+            }
+            return next;
+          });
+        }, 3600);
+        return () => clearInterval(interval);
+      }, [pageView]);
+
+      // 주문 후 공정 단계 자동 진행 시뮬레이션
+      useEffect(() => {
+        if (!currentOrder || !showFactoryDrawer) return;
+        if (factoryStepIdx >= FACTORY_STAGES.length - 1) return;
+        const timer = setTimeout(() => {
+          setFactoryStepIdx((prev) => prev + 1);
+        }, 1800);
+        return () => clearTimeout(timer);
+      }, [currentOrder, showFactoryDrawer, factoryStepIdx]);
+
+      const currentCell =
+        modules.find((m) => m.cell_id === activeCellId) || modules[0];
+
+      const hardCount = modules.filter((m) => m.hardness === '40A').length;
+      const softCount = modules.filter((m) => m.hardness === '10A').length;
+      const highCount = modules.filter((m) => m.height === 'HIGH').length;
+
+      const handleOpenCustomizer = (bed) => {
+        setSelectedBed(bed);
+        setModules(bed.defaultPreset.map((m) => ({ ...m })));
+        setActiveCellId(1);
+        setViewMode('quarter');
+      };
+
+      const handleHardnessChange = (newHardness) => {
+        if (currentCell.hardness === newHardness) return;
+
+        const nextModules = modules.map((m) => {
+          if (m.cell_id !== activeCellId) return m;
+          const adjustedHeight = newHardness === '40A' ? 'NORMAL' : m.height;
+          return { ...m, hardness: newHardness, height: adjustedHeight };
+        });
+
+        const nextHard = nextModules.filter((m) => m.hardness === '40A').length;
+        const nextSoft = nextModules.filter((m) => m.hardness === '10A').length;
+
+        if (nextHard > STOCK_LIMITS.HARD || nextSoft > STOCK_LIMITS.SOFT) {
+          setStockAlertMessage('재고가 부족합니다 다른 매트릭스를 선택해주세요');
+          return;
+        }
+
+        setModules(nextModules);
+      };
+
+      const handleHeightChange = (newHeight) => {
+        if (currentCell.height === newHeight) return;
+        if (currentCell.hardness === '40A' && newHeight === 'HIGH') return;
+
+        const nextModules = modules.map((m) =>
+          m.cell_id === activeCellId ? { ...m, height: newHeight } : m
+        );
+
+        const nextHigh = nextModules.filter((m) => m.height === 'HIGH').length;
+        if (nextHigh > STOCK_LIMITS.HIGH) {
+          setStockAlertMessage('재고가 부족합니다 다른 매트릭스를 선택해주세요');
+          return;
+        }
+
+        setModules(nextModules);
+      };
+
+      const applyQuickPreset = (presetType) => {
+        if (presetType === 'ALL_HARD') {
+          setModules(
+            modules.map((m) => ({ ...m, hardness: '40A', height: 'NORMAL' }))
+          );
+        } else if (presetType === 'SHOULDER_SOFT') {
+          setModules(
+            modules.map((m) => ({
+              ...m,
+              hardness: m.cell_id === 1 || m.cell_id === 2 ? '10A' : '40A',
+              height: m.cell_id === 1 || m.cell_id === 2 ? 'HIGH' : 'NORMAL',
+            }))
+          );
+        } else if (presetType === 'LUMBAR_SOFT') {
+          setModules(
+            modules.map((m) => ({
+              ...m,
+              hardness: m.cell_id === 3 || m.cell_id === 4 ? '10A' : '40A',
+              height: m.cell_id === 3 || m.cell_id === 4 ? 'HIGH' : 'NORMAL',
+            }))
+          );
+        }
+      };
+
+      const sendOrderToHmi = async (order) => {
+        const slots = Object.fromEntries(
+          order.modules.map((module) => [
+            `Slot ${module.cell_id}`,
+            module.height === 'HIGH' ? '높게' : module.hardness_code === '10A' ? '부드러움' : '단단함',
+          ])
+        );
+
+        setOrderDelivery({
+          orderId: order.order_id,
+          status: 'sending',
+          message: 'HMI로 주문을 전송하고 있습니다...',
+        });
+
+        try {
+          const response = await fetch('http://127.0.0.1:5000/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              order_id: order.order_id,
+              created_at: order.timestamp,
+              slots,
+            }),
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+          setOrderDelivery({
+            orderId: order.order_id,
+            status: 'sent',
+            message: '주문 서버가 접수했습니다. ROS 연결된 HMI에 표시됩니다.',
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          setOrderDelivery({
+            orderId: order.order_id,
+            status: 'failed',
+            message: `HMI 전송 실패: ${reason} (HMI가 실행 중인지, HTML과 같은 PC인지 확인하세요)`,
+          });
+        }
+      };
+
+      const handleSubmitOrder = () => {
+        const orderedIds = [1, 2, 3, 4, 5, 6];
+        const orderedModules = orderedIds.map((id) => {
+          const m = modules.find((item) => item.cell_id === id);
+          const isSoft = m.hardness === '10A';
+          return {
+            cell_id: id,
+            position_label: m.label,
+            hardness_code: m.hardness,
+            stiffness_N_mm: isSoft ? 7 : 12,
+            stiffness_label: isSoft ? '약 7N/mm' : '약 12N/mm',
+            height: m.height,
+          };
+        });
+
+        const payload = {
+          order_id: `TW-${new Date()
+            .toISOString()
+            .slice(0, 10)
+            .replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`,
+          brand: 'TEAMWON',
+          bed_model: selectedBed.id,
+          size: selectedBed.size,
+          timestamp: new Date().toISOString(),
+          matrix_layout: [
+            [1, 2],
+            [3, 4],
+            [5, 6],
+          ],
+          matrix_specs: [
+            [orderedModules[0], orderedModules[1]],
+            [orderedModules[2], orderedModules[3]],
+            [orderedModules[4], orderedModules[5]],
+          ],
+          modules: orderedModules,
+        };
+
+        window.TEAMWON_LATEST_ORDER = payload;
+        console.log('[TEAMWON ROBOT ORDER]', payload);
+
+        void sendOrderToHmi(payload);
+        setCurrentOrder(payload);
+        setFactoryStepIdx(0);
+        setSelectedBed(null);
+        setShowFactoryDrawer(true);
+      };
+
+      const filteredBeds = BED_PRODUCTS.filter((bed) => {
+        const matchesSearch =
+          bed.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          bed.subtitle.includes(searchQuery);
+        const matchesSize =
+          selectedSize === 'ALL' || bed.size.includes(selectedSize);
+        const matchesType =
+          selectedType === 'ALL' || bed.typeLabel === selectedType;
+        return matchesSearch && matchesSize && matchesType;
+      });
+
+      const toggleWishlist = (e, id) => {
+        e.stopPropagation();
+        setWishlist((prev) =>
+          prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+        );
+      };
+
+      const activeDemoConfig =
+        HERO_DEMO_CONFIGS[(demoStep > 0 ? demoStep - 1 : 0) % HERO_DEMO_CONFIGS.length];
+
+      return (
+        <div className="min-h-screen bg-white text-[#1A1A1A]">
+          {/* ================= 1. 상단 GNB (시몬스 스타일 2단 화이트 헤더) ================= */}
+          <header className="sticky top-0 z-40 bg-white border-b border-[#EAEAEA]">
+            <div className="max-w-[1440px] mx-auto px-6 lg:px-12 pt-3 pb-1 flex items-center justify-between text-[11px] text-[#767676]">
+              <span className="tracking-wider">
+                6-ZONE MODULAR MATTRESS &amp; BESPOKE SLEEP
+              </span>
+              <div className="flex items-center gap-5">
+                <button
+                  onClick={() => setShowGuideModal(true)}
+                  className="hover:text-[#1A1A1A] transition-colors"
+                >
+                  쿠션 스펙 가이드
+                </button>
+                <button
+                  onClick={() => setShowFactoryDrawer(true)}
+                  className="hover:text-[#1A1A1A] transition-colors flex items-center gap-1.5 font-medium text-[#1A1A1A]"
+                >
+                  <span>주문서</span>
+                  {currentOrder && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#1A1A1A]" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="max-w-[1440px] mx-auto px-6 lg:px-12 h-14 flex items-center justify-between">
+              {/* 메인 TEAMWON 브랜드 로고 (영문 단독 표기) */}
+              <button
+                onClick={() => setPageView('HOME')}
+                className="text-left flex items-center"
+              >
+                <span className="text-[23px] font-bold tracking-[0.24em] text-[#111111]">
+                  TEAMWON
+                </span>
+              </button>
+
+              <nav className="hidden md:flex items-center gap-9 text-[14px] font-medium text-[#222222]">
+                <button
+                  onClick={() => setPageView('HOME')}
+                  className={`py-1 transition-colors ${
+                    pageView === 'HOME'
+                      ? 'border-b-2 border-[#111111] font-semibold'
+                      : 'text-[#666666] hover:text-[#111111]'
+                  }`}
+                >
+                  브랜드 홈
+                </button>
+                <button
+                  onClick={() => setPageView('CATALOG')}
+                  className={`py-1 transition-colors ${
+                    pageView === 'CATALOG'
+                      ? 'border-b-2 border-[#111111] font-semibold'
+                      : 'text-[#666666] hover:text-[#111111]'
+                  }`}
+                >
+                  모든 제품 보기
+                </button>
+                <button
+                  onClick={() => handleOpenCustomizer(BED_PRODUCTS[0])}
+                  className="text-[#666666] hover:text-[#111111] transition-colors"
+                >
+                  나만의 침대 만들기
+                </button>
+                <button
+                  onClick={() => setShowGuideModal(true)}
+                  className="text-[#666666] hover:text-[#111111] transition-colors"
+                >
+                  모듈 시스템
+                </button>
+              </nav>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleOpenCustomizer(BED_PRODUCTS[0])}
+                  className="px-4 py-2 bg-[#1A1A1A] text-white text-[12px] font-medium tracking-wide hover:bg-[#333333] transition-colors"
+                >
+                  맞춤 침대 구성하기
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* ================= 2. 메인 홈 화면 ================= */}
+          {pageView === 'HOME' && (
+            <main>
+              <section className="relative w-full h-[640px] sm:h-[720px] bg-[#F5F3EF] overflow-hidden border-b border-[#E5E5E5]">
+                {/* 슬라이드 0: 대형 침대 브랜드 화보 */}
+                <div
+                  className={`absolute inset-0 transition-opacity duration-1000 ${
+                    heroSlide === 0
+                      ? 'opacity-100 pointer-events-auto'
+                      : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <img
+                    src="https://images.unsplash.com/photo-1616594039964-ae9021a400a0?auto=format&fit=crop&w=2000&q=90"
+                    alt="TEAMWON 메인 침실 화보"
+                    className="w-full h-full object-cover object-center"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/15 to-transparent" />
+                  <div className="absolute inset-0 flex flex-col items-center justify-end pb-20 px-6 text-center text-white">
+                    <p className="text-[12px] tracking-[0.28em] uppercase text-white/85 mb-3">
+                      TEAMWON BESPOKE MATTRESS
+                    </p>
+                    <h1 className="text-[32px] sm:text-[46px] font-light tracking-tight leading-tight">
+                      당신의 체형에 맞춰 조립되는 6개의 독립 쿠션
+                    </h1>
+                    <p className="text-[14px] sm:text-[16px] text-white/85 mt-3 max-w-xl font-light">
+                      어깨·허리·다리 6구역의 강성과 높낮이를 직접 선택하고 정밀 공정으로 완성하세요.
+                    </p>
+                    <div className="mt-7 flex items-center gap-3">
+                      <button
+                        onClick={() => handleOpenCustomizer(BED_PRODUCTS[0])}
+                        className="px-7 py-3.5 bg-white text-[#111111] text-[13px] font-semibold tracking-wide hover:bg-[#F2F2F2] transition-colors"
+                      >
+                        나만의 침대 만들기
+                      </button>
+                      <button
+                        onClick={() => setPageView('CATALOG')}
+                        className="px-7 py-3.5 border border-white text-white text-[13px] font-medium tracking-wide hover:bg-white/15 transition-colors"
+                      >
+                        전체 컬렉션 보기
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 슬라이드 1: 실시간 3D 직육면체 매트리스 모듈 변화 쇼케이스 */}
+                <div
+                  className={`absolute inset-0 transition-opacity duration-1000 bg-[#F7F5F0] ${
+                    heroSlide === 1
+                      ? 'opacity-100 pointer-events-auto'
+                      : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <div className="max-w-[1360px] mx-auto h-full px-6 lg:px-14 grid grid-cols-1 lg:grid-cols-12 items-center gap-8 py-10">
+                    <div className="lg:col-span-5 space-y-5 text-left">
+                      <span className="inline-block px-3 py-1 bg-[#1A1A1A] text-white text-[11px] tracking-[0.18em] uppercase">
+                        6-ZONE MODULAR SYSTEM
+                      </span>
+                      <h2 className="text-[28px] sm:text-[38px] font-light text-[#111111] leading-snug">
+                        구역별 강성과 높낮이를
+                        <br />
+                        <strong className="font-semibold">원하는 대로 교체</strong>
+                      </h2>
+                      <div className="p-5 bg-white border border-[#E2DFD9]">
+                        <p className="text-[12px] font-semibold text-[#4A5D6E] tracking-wide">
+                          실시간 시연 프리셋 · {activeDemoConfig.title}
+                        </p>
+                        <p className="text-[13px] text-[#555555] mt-1.5 leading-relaxed">
+                          {activeDemoConfig.desc}
+                        </p>
+                      </div>
+                      <div className="pt-2 flex items-center gap-3">
+                        <button
+                          onClick={() => handleOpenCustomizer(BED_PRODUCTS[0])}
+                          className="px-6 py-3.5 bg-[#1A1A1A] text-white text-[13px] font-medium hover:bg-[#333333] transition-colors"
+                        >
+                          직접 모듈 구성해보기
+                        </button>
+                        <button
+                          onClick={() => setPageView('CATALOG')}
+                          className="px-6 py-3.5 border border-[#CCCCCC] bg-white text-[#1A1A1A] text-[13px] font-medium hover:border-[#1A1A1A] transition-colors"
+                        >
+                          침대 모델 선택
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-7 bg-white border border-[#E5E2DC] p-4 shadow-sm">
+                      <SolidBed3D
+                        modules={activeDemoConfig.cells}
+                        interactive={false}
+                        viewMode="quarter"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 좌우 슬라이드 전환 화살표 */}
+                <button
+                  onClick={() => setHeroSlide((prev) => (prev === 0 ? 1 : 0))}
+                  aria-label="이전 슬라이드"
+                  className="absolute left-5 top-1/2 -translate-y-1/2 z-20 w-11 h-11 rounded-full bg-white/75 hover:bg-white text-[#1A1A1A] flex items-center justify-center shadow-sm transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setHeroSlide((prev) => (prev === 0 ? 1 : 0))}
+                  aria-label="다음 슬라이드"
+                  className="absolute right-5 top-1/2 -translate-y-1/2 z-20 w-11 h-11 rounded-full bg-white/75 hover:bg-white text-[#1A1A1A] flex items-center justify-center shadow-sm transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+
+                {/* 하단 슬라이드 인디케이터 바 */}
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2">
+                  <button
+                    onClick={() => setHeroSlide(0)}
+                    className={`h-[3px] transition-all ${
+                      heroSlide === 0 ? 'w-12 bg-white' : 'w-8 bg-white/40'
+                    }`}
+                  />
+                  <button
+                    onClick={() => setHeroSlide(1)}
+                    className={`h-[3px] transition-all ${
+                      heroSlide === 1 ? 'w-12 bg-[#1A1A1A]' : 'w-8 bg-black/25'
+                    }`}
+                  />
+                </div>
+              </section>
+
+              {/* 홈 하단 베스트 컬렉션 미리보기 */}
+              <section className="max-w-[1360px] mx-auto px-6 lg:px-12 py-20">
+                <div className="flex items-end justify-between mb-10">
+                  <div>
+                    <p className="text-[11px] tracking-[0.2em] text-[#767676] uppercase">
+                      SIGNATURE COLLECTION
+                    </p>
+                    <h2 className="text-[26px] font-normal text-[#111111] mt-1">
+                      TEAMWON 대표 라인업
+                    </h2>
+                  </div>
+                  <button
+                    onClick={() => setPageView('CATALOG')}
+                    className="text-[13px] text-[#111111] border-b border-[#111111] pb-0.5 hover:opacity-70"
+                  >
+                    전체 제품 보기
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                  {BED_PRODUCTS.slice(0, 3).map((bed) => (
+                    <div
+                      key={bed.id}
+                      onClick={() => handleOpenCustomizer(bed)}
+                      className="group cursor-pointer"
+                    >
+                      <div className="aspect-[4/3] bg-[#F5F5F5] overflow-hidden mb-4">
+                        <img
+                          src={bed.image}
+                          alt={bed.name}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-[12px] text-[#767676]">
+                        <span>{bed.size}</span>
+                        <span>{bed.typeLabel}</span>
+                      </div>
+                      <h3 className="text-[18px] font-bold text-[#111111] mt-1">
+                        {bed.name}
+                      </h3>
+                      <p className="text-[13px] text-[#666666] mt-0.5">
+                        {bed.subtitle}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </main>
+          )}
+
+          {/* ================= 3. 전체 제품 카탈로그 페이지 ================= */}
+          {pageView === 'CATALOG' && (
+            <main className="max-w-[1360px] mx-auto px-6 lg:px-12 py-12">
+              <div className="pb-6 border-b border-[#E5E5E5] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-[28px] font-normal text-[#111111]">
+                    매트리스 &amp; 프레임
+                  </h1>
+                  <p className="text-[13px] text-[#666666] mt-1">
+                    총 <strong className="text-[#111111]">{filteredBeds.length}개</strong>의 맞춤형 모델이 있습니다.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-8 grid grid-cols-1 lg:grid-cols-12 gap-10">
+                {/* 좌측 필터 사이드바 */}
+                <aside className="lg:col-span-3 space-y-6">
+                  <div className="relative bg-[#93ABB8]/25 flex items-center px-3.5 py-2.5">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="검색어를 입력하세요"
+                      className="w-full bg-transparent text-[13px] text-[#1A1A1A] placeholder-[#667780] focus:outline-none"
+                    />
+                    <svg className="w-4 h-4 text-[#556670]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <circle cx="11" cy="11" r="8" />
+                      <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
+                    </svg>
+                  </div>
+
+                  {/* 사이즈 아코디언 */}
+                  <div className="border-t border-[#E5E5E5] pt-4">
+                    <button
+                      onClick={() => setOpenFilter((p) => ({ ...p, size: !p.size }))}
+                      className="w-full flex items-center justify-between text-[14px] font-semibold text-[#1A1A1A]"
+                    >
+                      <span>사이즈</span>
+                      <span>{openFilter.size ? '−' : '+'}</span>
+                    </button>
+                    {openFilter.size && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {['ALL', 'LK', 'K', 'SS'].map((sz) => (
+                          <button
+                            key={sz}
+                            onClick={() => setSelectedSize(sz)}
+                            className={`px-3 py-1.5 text-[12px] border transition-colors ${
+                              selectedSize === sz
+                                ? 'border-[#1A1A1A] bg-[#1A1A1A] text-white'
+                                : 'border-[#DDDDDD] text-[#555555] hover:border-[#1A1A1A]'
+                            }`}
+                          >
+                            {sz === 'ALL' ? '전체' : sz}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 타입 아코디언 */}
+                  <div className="border-t border-[#E5E5E5] pt-4">
+                    <button
+                      onClick={() => setOpenFilter((p) => ({ ...p, type: !p.type }))}
+                      className="w-full flex items-center justify-between text-[14px] font-semibold text-[#1A1A1A]"
+                    >
+                      <span>구성 타입</span>
+                      <span>{openFilter.type ? '−' : '+'}</span>
+                    </button>
+                    {openFilter.type && (
+                      <div className="mt-3 space-y-1.5 text-[13px]">
+                        {[
+                          'ALL',
+                          '6-Zone Custom',
+                          'Soft Balance',
+                          'Firm Support',
+                          'Lumbar Relief',
+                        ].map((tp) => (
+                          <button
+                            key={tp}
+                            onClick={() => setSelectedType(tp)}
+                            className={`block w-full text-left py-1 ${
+                              selectedType === tp
+                                ? 'font-bold text-[#1A1A1A]'
+                                : 'text-[#666666] hover:text-[#1A1A1A]'
+                            }`}
+                          >
+                            {tp === 'ALL' ? '전체 타입' : tp}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={() => setShowGuideModal(true)}
+                    className="w-full py-3 border border-[#CCCCCC] text-[13px] font-medium text-[#1A1A1A] hover:border-[#1A1A1A] transition-colors"
+                  >
+                    쿠션 스펙 가이드
+                  </button>
+                </aside>
+
+                {/* 우측 3열 제품 그리드 */}
+                <section className="lg:col-span-9 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-7 gap-y-11">
+                  {filteredBeds.map((bed) => {
+                    const wished = wishlist.includes(bed.id);
+                    return (
+                      <div
+                        key={bed.id}
+                        onClick={() => handleOpenCustomizer(bed)}
+                        className="group cursor-pointer"
+                      >
+                        <div className="aspect-[4/4] bg-[#F5F5F5] overflow-hidden mb-3.5">
+                          <img
+                            src={bed.image}
+                            alt={bed.name}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[12px] text-[#767676]">
+                          <span>{bed.size}</span>
+                          <button
+                            onClick={(e) => toggleWishlist(e, bed.id)}
+                            className="text-[#555555] hover:text-[#1A1A1A]"
+                          >
+                            <svg
+                              className="w-4 h-4"
+                              fill={wished ? '#1A1A1A' : 'none'}
+                              stroke="currentColor"
+                              strokeWidth="1.8"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                        <h3 className="text-[17px] font-bold text-[#1A1A1A] mt-0.5">
+                          {bed.name}
+                        </h3>
+                        <p className="text-[12px] text-[#666666] mt-0.5">
+                          {bed.typeLabel}
+                        </p>
+                        <div className="mt-2.5 flex items-center gap-1.5">
+                          {bed.swatches.map((hex, i) => (
+                            <span
+                              key={i}
+                              className="w-3 h-3 border border-[#CCCCCC]"
+                              style={{ backgroundColor: hex }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </section>
+              </div>
+            </main>
+          )}
+
+          {/* ================= 4. 나만의 침대 만들기 (3D 매트리스 커스텀 모달) ================= */}
+          {selectedBed && (
+            <div className="fixed inset-0 z-50 bg-black/55 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+              <div className="bg-white w-full max-w-[1140px] border border-[#E5E5E5] shadow-2xl overflow-hidden my-auto">
+                <div className="px-6 sm:px-8 py-5 border-b border-[#E5E5E5] flex items-center justify-between">
+                  <div>
+                    <span className="text-[11px] tracking-[0.18em] text-[#767676] uppercase">
+                      BESPOKE MATTRESS CONFIGURATOR
+                    </span>
+                    <h2 className="text-[20px] sm:text-[22px] font-bold text-[#1A1A1A] mt-0.5">
+                      나만의 침대 만들기 · {selectedBed.name}
+                    </h2>
+                  </div>
+                  <button
+                    onClick={() => setSelectedBed(null)}
+                    className="p-2 text-[#555555] hover:text-[#1A1A1A]"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12">
+                  {/* 좌측: 3D 매트리스 실시간 뷰어 */}
+                  <div className="lg:col-span-7 bg-[#F7F6F2] p-6 sm:p-8 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-[#E5E5E5]">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <div className="text-[12px] text-[#555555]">
+                        배열 순서: <strong>[1, 2], [3, 4], [5, 6]</strong> (블록을 클릭해 선택)
+                      </div>
+                      <div className="flex items-center border border-[#CCCCCC] bg-white">
+                        <button
+                          onClick={() => setViewMode('quarter')}
+                          className={`px-3 py-1 text-[11px] font-medium ${
+                            viewMode === 'quarter'
+                              ? 'bg-[#1A1A1A] text-white'
+                              : 'text-[#555555]'
+                          }`}
+                        >
+                          쿼터뷰
+                        </button>
+                        <button
+                          onClick={() => setViewMode('side')}
+                          className={`px-3 py-1 text-[11px] font-medium ${
+                            viewMode === 'side'
+                              ? 'bg-[#1A1A1A] text-white'
+                              : 'text-[#555555]'
+                          }`}
+                        >
+                          측면 높이 비교
+                        </button>
+                      </div>
+                    </div>
+
+                    <SolidBed3D
+                      modules={modules}
+                      activeCellId={activeCellId}
+                      onSelectCell={setActiveCellId}
+                      interactive={true}
+                      viewMode={viewMode}
+                      compact={true}
+                    />
+
+                    <div className="mt-4 pt-4 border-t border-[#E2E0D8] grid grid-cols-3 gap-2 text-center text-[12px]">
+                      <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
+                        <span className="text-[#767676] block text-[11px]">
+                          딱딱함 (약 12N/mm)
+                        </span>
+                        <strong className="text-[#1A1A1A]">
+                          {hardCount} / {STOCK_LIMITS.HARD}개 사용
+                        </strong>
+                      </div>
+                      <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
+                        <span className="text-[#767676] block text-[11px]">
+                          부드러움 (약 7N/mm)
+                        </span>
+                        <strong className="text-[#1A1A1A]">
+                          {softCount} / {STOCK_LIMITS.SOFT}개 사용
+                        </strong>
+                      </div>
+                      <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
+                        <span className="text-[#767676] block text-[11px]">
+                          높은 지지
+                        </span>
+                        <strong className="text-[#1A1A1A]">
+                          {highCount} / {STOCK_LIMITS.HIGH}개 사용
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 우측: 선택된 구역 커스텀 설정 패널 */}
+                  <div className="lg:col-span-5 p-6 sm:p-8 flex flex-col justify-between space-y-6">
+                    <div className="space-y-6">
+                      <div>
+                        <label className="block text-[12px] font-semibold text-[#767676] mb-2">
+                          빠른 추천 세팅
+                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            onClick={() => applyQuickPreset('ALL_HARD')}
+                            className="py-2 px-2 border border-[#DDDDDD] text-[12px] hover:border-[#1A1A1A] transition-colors"
+                          >
+                            전신 탄탄함
+                          </button>
+                          <button
+                            onClick={() => applyQuickPreset('SHOULDER_SOFT')}
+                            className="py-2 px-2 border border-[#DDDDDD] text-[12px] hover:border-[#1A1A1A] transition-colors"
+                          >
+                            어깨 릴리프
+                          </button>
+                          <button
+                            onClick={() => applyQuickPreset('LUMBAR_SOFT')}
+                            className="py-2 px-2 border border-[#DDDDDD] text-[12px] hover:border-[#1A1A1A] transition-colors"
+                          >
+                            허리 릴리프
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[12px] font-semibold text-[#767676]">
+                            매트리스 위치 선택
+                          </span>
+                          <span className="text-[12px] font-bold text-[#1A1A1A]">
+                            #{currentCell.cell_id} ({currentCell.label})
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[1, 2, 3, 4, 5, 6].map((id) => {
+                            const item = modules.find((m) => m.cell_id === id);
+                            const isAct = activeCellId === id;
+                            return (
+                              <button
+                                key={id}
+                                onClick={() => setActiveCellId(id)}
+                                className={`py-2.5 px-3 border text-left flex items-center justify-between transition-colors ${
+                                  isAct
+                                    ? 'border-[#1A1A1A] bg-[#1A1A1A] text-white'
+                                    : 'border-[#E0E0E0] bg-white text-[#1A1A1A] hover:border-[#999999]'
+                                }`}
+                              >
+                                <span className="text-[12px] font-semibold">
+                                  #{id} {item.label}
+                                </span>
+                                <span
+                                  className={`text-[11px] ${
+                                    isAct ? 'text-white/80' : 'text-[#767676]'
+                                  }`}
+                                >
+                                  {item.hardness === '10A' ? '약 7N/mm' : '약 12N/mm'} ·{' '}
+                                  {item.height === 'HIGH' ? '높음' : '기본'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[12px] font-semibold text-[#767676] mb-2">
+                          쿠션 강성 선택
+                        </label>
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <button
+                            onClick={() => handleHardnessChange('40A')}
+                            className={`p-3.5 border text-left transition-all ${
+                              currentCell.hardness === '40A'
+                                ? 'border-[#1A1A1A] bg-[#F7F8FA]'
+                                : 'border-[#E0E0E0] hover:border-[#999999]'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="w-3 h-3 bg-[#53687A] inline-block" />
+                              <span className="text-[14px] font-bold text-[#1A1A1A]">
+                                딱딱함
+                              </span>
+                            </div>
+                            <span className="block text-[12px] text-[#666666] mt-1">
+                              강성 약 12N/mm · 고밀도 지지
+                            </span>
+                          </button>
+
+                          <button
+                            onClick={() => handleHardnessChange('10A')}
+                            className={`p-3.5 border text-left transition-all ${
+                              currentCell.hardness === '10A'
+                                ? 'border-[#1A1A1A] bg-[#FAF8F4]'
+                                : 'border-[#E0E0E0] hover:border-[#999999]'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="w-3 h-3 bg-[#F4ECE0] border border-[#C9BBA6] inline-block" />
+                              <span className="text-[14px] font-bold text-[#1A1A1A]">
+                                부드러움
+                              </span>
+                            </div>
+                            <span className="block text-[12px] text-[#666666] mt-1">
+                              강성 약 7N/mm · 소프트 쿠션
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[12px] font-semibold text-[#767676] mb-2">
+                          쿠션 높낮이 선택
+                        </label>
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <button
+                            onClick={() => handleHeightChange('NORMAL')}
+                            className={`p-3 border text-center text-[13px] font-medium transition-colors ${
+                              currentCell.height === 'NORMAL'
+                                ? 'border-[#1A1A1A] bg-[#1A1A1A] text-white'
+                                : 'border-[#E0E0E0] text-[#1A1A1A] hover:border-[#999999]'
+                            }`}
+                          >
+                            기본 높이
+                          </button>
+
+                          <button
+                            onClick={() => handleHeightChange('HIGH')}
+                            disabled={currentCell.hardness === '40A'}
+                            className={`p-3 border text-center text-[13px] font-medium transition-colors ${
+                              currentCell.hardness === '40A'
+                                ? 'border-[#EAEAEA] bg-[#F5F5F5] text-[#AAAAAA] cursor-not-allowed'
+                                : currentCell.height === 'HIGH'
+                                ? 'border-[#1A1A1A] bg-[#1A1A1A] text-white'
+                                : 'border-[#E0E0E0] text-[#1A1A1A] hover:border-[#999999]'
+                            }`}
+                          >
+                            {currentCell.hardness === '40A'
+                              ? '높은 지지(재고소진)'
+                              : '높은 지지'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-4 border-t border-[#E5E5E5] flex items-center gap-3">
+                      <button
+                        onClick={() => handleOpenCustomizer(selectedBed)}
+                        className="px-4 py-3.5 border border-[#CCCCCC] text-[#555555] hover:text-[#1A1A1A] hover:border-[#1A1A1A]"
+                        title="초기화"
+                      >
+                        ↺
+                      </button>
+                      <button
+                        onClick={handleSubmitOrder}
+                        className="flex-1 py-3.5 bg-[#1A1A1A] text-white text-[14px] font-semibold tracking-wide hover:bg-[#333333] transition-colors"
+                      >
+                        나만의 침대 주문하기
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= 5. 재고 부족 알림 팝업 ================= */}
+          {stockAlertMessage && (
+            <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4">
+              <div className="bg-white w-full max-w-[440px] border border-[#1A1A1A] p-7 sm:p-8 shadow-2xl text-center">
+                <div className="w-11 h-11 mx-auto mb-4 rounded-full bg-[#F5F5F5] flex items-center justify-center text-[#1A1A1A] font-bold">
+                  !
+                </div>
+                <h3 className="text-[17px] sm:text-[18px] font-bold text-[#1A1A1A] leading-snug break-keep">
+                  {stockAlertMessage}
+                </h3>
+                <p className="text-[13px] text-[#666666] mt-2.5 leading-relaxed break-keep">
+                  현재 보유 수량은 딱딱함(약 12N/mm) 최대 6개, 부드러움(약 7N/mm) 최대 2개, 높은 지지 최대 2개입니다.
+                </p>
+                <button
+                  onClick={() => setStockAlertMessage('')}
+                  className="mt-6 w-full py-3 bg-[#1A1A1A] text-white text-[13px] font-semibold hover:bg-[#333333] transition-colors"
+                >
+                  확인
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ================= 6. 쿠션 스펙 가이드 모달 ================= */}
+          {showGuideModal && (
+            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+              <div className="bg-white w-full max-w-[560px] border border-[#E5E5E5] p-7 sm:p-9 shadow-2xl">
+                <div className="flex items-center justify-between pb-4 border-b border-[#E5E5E5]">
+                  <h3 className="text-[18px] font-bold text-[#1A1A1A]">
+                    TEAMWON 6존 쿠션 가이드
+                  </h3>
+                  <button
+                    onClick={() => setShowGuideModal(false)}
+                    className="text-[#555555] hover:text-[#1A1A1A]"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="py-5 space-y-4 text-[13px] text-[#444444] leading-relaxed">
+                  <div className="p-4 bg-[#F8F8F8] border border-[#EAEAEA]">
+                    <strong className="text-[#1A1A1A] block mb-1">
+                      1. 딱딱함 (약 12N/mm / Firm)
+                    </strong>
+                    척추와 골반을 단단하게 받쳐주어 허리 처짐을 방지하는 고밀도 지지 모듈입니다. (보유 6개)
+                  </div>
+                  <div className="p-4 bg-[#FAF8F4] border border-[#EAE6DF]">
+                    <strong className="text-[#1A1A1A] block mb-1">
+                      2. 부드러움 (약 7N/mm / Soft)
+                    </strong>
+                    어깨나 특정 부위의 체압을 부드럽게 감싸 안아주는 저경도 쿠션 모듈입니다. (보유 2개)
+                  </div>
+                  <div className="p-4 bg-[#F8F8F8] border border-[#EAEAEA]">
+                    <strong className="text-[#1A1A1A] block mb-1">
+                      3. 높낮이 조절 (기본 높이 / 높은 지지)
+                    </strong>
+                    부위별 지지 높이를 다르게 설계하여 인체 굴곡에 맞춘 맞춤형 수면 자세를 완성합니다. (높은 지지 2개)
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowGuideModal(false)}
+                  className="w-full py-3 bg-[#1A1A1A] text-white text-[13px] font-medium"
+                >
+                  닫기
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ================= 7. 주문서 드로어 ================= */}
+          {showFactoryDrawer && (
+            <div className="fixed inset-0 z-50 bg-black/45 flex justify-end">
+              <div className="bg-white w-full max-w-[480px] h-full flex flex-col justify-between shadow-2xl overflow-y-auto">
+                <div className="p-6 sm:p-8">
+                  <div className="flex items-center justify-between pb-5 border-b border-[#E5E5E5]">
+                    <div>
+                      <span className="text-[11px] tracking-[0.15em] text-[#767676] uppercase">
+                        ORDER SHEET
+                      </span>
+                      <h3 className="text-[18px] font-bold text-[#1A1A1A] mt-0.5">
+                        주문서
+                      </h3>
+                    </div>
+                    <button
+                      onClick={() => setShowFactoryDrawer(false)}
+                      className="text-[#555555] hover:text-[#1A1A1A]"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {!currentOrder ? (
+                    <div className="py-20 text-center space-y-4">
+                      <p className="text-[14px] text-[#666666]">
+                        접수된 맞춤 침대 주문서가 없습니다.
+                      </p>
+                      <button
+                        onClick={() => {
+                          setShowFactoryDrawer(false);
+                          handleOpenCustomizer(BED_PRODUCTS[0]);
+                        }}
+                        className="px-5 py-2.5 bg-[#1A1A1A] text-white text-[12px] font-medium"
+                      >
+                        나만의 침대 만들기
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="py-6 space-y-6">
+                      <div className="bg-[#F8F8F8] p-4 border border-[#E5E5E5] space-y-1.5 text-[13px]">
+                        <div className="flex justify-between">
+                          <span className="text-[#767676]">주문번호</span>
+                          <strong className="text-[#1A1A1A]">
+                            {currentOrder.order_id}
+                          </strong>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-[#767676]">모델 / 규격</span>
+                          <span className="text-[#1A1A1A]">
+                            {currentOrder.bed_model} ({currentOrder.size})
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-[#767676]">배열 순서</span>
+                          <span className="text-[#1A1A1A]">
+                            [1, 2], [3, 4], [5, 6]
+                          </span>
+                        </div>
+                      </div>
+
+                      {orderDelivery?.orderId === currentOrder.order_id && (
+                        <div
+                          role="status"
+                          aria-live="polite"
+                          className={`p-3 border text-[12px] ${
+                            orderDelivery.status === 'sent'
+                              ? 'border-green-200 bg-green-50 text-green-800'
+                              : orderDelivery.status === 'failed'
+                              ? 'border-red-200 bg-red-50 text-red-800'
+                              : 'border-[#E5E5E5] bg-white text-[#666666]'
+                          }`}
+                        >
+                          {orderDelivery.message}
+                        </div>
+                      )}
+
+                      <div>
+                        <h4 className="text-[12px] font-semibold text-[#767676] mb-2">
+                          구역별 주문 사양
+                        </h4>
+                        <div className="grid grid-cols-2 gap-2">
+                          {currentOrder.modules.map((m) => (
+                            <div
+                              key={m.cell_id}
+                              className="p-3 border border-[#E5E5E5] text-[12px] flex items-center justify-between"
+                            >
+                              <div>
+                                <strong className="text-[#1A1A1A]">
+                                  #{m.cell_id} {m.position_label}
+                                </strong>
+                                <span className="block text-[#666666] mt-0.5">
+                                  {m.hardness_code === '10A' ? '부드러움' : '딱딱함'} (
+                                  {m.stiffness_label})
+                                </span>
+                              </div>
+                              <span className="px-2 py-0.5 bg-[#F3F3F3] text-[#1A1A1A] text-[11px] font-medium">
+                                {m.height === 'HIGH' ? '높은 지지' : '기본 높이'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-[12px] font-semibold text-[#767676] mb-2">
+                          제작 진행 현황
+                        </h4>
+                        <div className="border border-[#E5E5E5] divide-y divide-[#E5E5E5]">
+                          {FACTORY_STAGES.map((stage, idx) => {
+                            const isDone = idx < factoryStepIdx;
+                            const isActive = idx === factoryStepIdx;
+                            return (
+                              <div
+                                key={stage.code}
+                                className={`px-4 py-3 flex items-center justify-between text-[13px] ${
+                                  isActive
+                                    ? 'bg-[#F8F8F8] font-bold text-[#1A1A1A]'
+                                    : 'text-[#666666]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <span className="text-[11px] text-[#999999] font-mono">
+                                    {stage.code}
+                                  </span>
+                                  <span>{stage.name}</span>
+                                </div>
+                                {isDone ? (
+                                  <span className="text-[#1A1A1A] font-bold">✓</span>
+                                ) : isActive ? (
+                                  <span className="text-[11px] text-[#1A1A1A]">
+                                    진행중
+                                  </span>
+                                ) : (
+                                  <span className="text-[11px] text-[#CCCCCC]">
+                                    대기
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-6 border-t border-[#E5E5E5]">
+                  <button
+                    onClick={() => setShowFactoryDrawer(false)}
+                    className="w-full py-3 border border-[#1A1A1A] text-[13px] font-medium text-[#1A1A1A] hover:bg-[#1A1A1A] hover:text-white transition-colors"
+                  >
+                    닫기
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 푸터 */}
+          <footer className="border-t border-[#E5E5E5] bg-[#FAFAFA] mt-20">
+            <div className="max-w-[1360px] mx-auto px-6 lg:px-12 py-12 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 text-[12px] text-[#767676]">
+              <div>
+                <p className="text-[15px] font-bold tracking-[0.22em] text-[#1A1A1A]">
+                  TEAMWON
+                </p>
+                <p className="mt-2">
+                  6-Zone Bespoke Modular Mattress System
+                </p>
+              </div>
+              <p>© 2026 TEAMWON MATTRESS. All rights reserved.</p>
+            </div>
+          </footer>
+
+          {/* TOP 플로팅 버튼 */}
+          <button
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            aria-label="맨 위로 이동"
+            className="fixed bottom-6 right-6 z-30 w-11 h-11 bg-white border border-[#CCCCCC] shadow-md flex items-center justify-center text-[#1A1A1A] hover:bg-[#1A1A1A] hover:text-white transition-colors text-xs font-bold"
+          >
+            ↑
+          </button>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
 </body>
 </html>

@@ -31,7 +31,7 @@ TOPIC_LOG = '/cushion/log'
 TOPIC_ORDER_CONFIG = '/cushion/order_config'
 
 # HTML 선택값을 HMI에 표시할 때 사용할 강성값 [N/mm]
-STIFFNESS_K = {'부드러움': 6.2, '단단함': 12.0}
+STIFFNESS_K = {'부드러움': 6.2, '단단함': 12.0, '높게': 7.0}   # '높게' = 키 큰 무른 큐브 (웹 HIGH, 2026-11-20 추가)
 
 # 연결 판단: 이 시간 동안 status 가 안 오면 끊김으로 본다
 STATUS_TIMEOUT = 2.0
@@ -40,18 +40,16 @@ MODES = [
     ('calibrate', '기준값 측정'),
     ('diagnose', '진단만'),
     ('full', '진단 + 교체'),
-    ('repair', '자동 보수 (빈칸·안 맞는 모듈)'),
-    ('order', '주문대로 구성 (마지막 주문)'),
 ]
 MODE_KEYS = [k for k, _ in MODES]
 
-# 플로우차트 순서대로 (상태 표시줄에 이 순서로 나온다). bed_inspect 9단계 공정과 같다 (천 조이기/풀기 단계는 삭제)
-#   1 홈 = INIT, 2 측정 = MEASURE, 3 판정·계획 = JUDGE, 4 커버 열기 = COVER_OPEN,
-#   5 블록 빼기 · 6 블록 넣기 = REPLACE, 7 커버 닫기 = COVER_CLOSE, 8 재측정 = REMEASURE, 9 확인 = REPORT
+# 플로우차트 순서대로 (상태 표시줄에 이 순서로 나온다)
 FLOW_STATES = [
-    ('INIT', '홈 위치'),
+    ('INIT', '초기화'),
+    ('TENSION', '천 조이기'),
     ('MEASURE', '측정'),
     ('JUDGE', '판정'),
+    ('RELEASE', '천 풀기'),
     ('COVER_OPEN', '커버 오픈'),
     ('REPLACE', '모듈 교체'),
     ('COVER_CLOSE', '커버 클로즈'),
@@ -62,7 +60,6 @@ OTHER_STATES = [
     ('IDLE', '대기'),
     ('DONE', '완료'),
     ('FAULT', '이상'),
-    ('CONFIRM', '확인 대기'),
 ]
 STATE_LABELS = dict(FLOW_STATES + OTHER_STATES)
 
@@ -73,9 +70,6 @@ MODULE_STATUS = {
     'ok': '정상',
     'defect': '불량',
     'replaced': '교체됨',
-    'warn': '주의',
-    'empty': '빈칸',
-    'mismatch': '맞지 않음',
 }
 
 # 모듈 배치: 가로 2 x 세로 3.

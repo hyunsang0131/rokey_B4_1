@@ -1,300 +1,540 @@
-# 협동1 쿠션 진단 HMI (PyQt5)
-#
-#   ros2 run cushion_hmi hmi
-#
-# 미션 노드와 /cushion/* 토픽으로만 통신한다 (형식은 protocol.py).
-# 로봇을 직접 움직이지 않으므로, 로봇이 동작하는 동안에도 화면이 멈추지 않는다.
-#
-# 주의: [정지 요청]은 미션 노드에 정지를 "요청"하는 소프트웨어 명령이다.
-#       위급 상황에서는 반드시 티칭 펜던트나 비상정지 버튼을 쓴다.
-
-import signal
+#!/usr/bin/env python3
+"""Cushion HMI UI prototype. PyQt5 + matplotlib. No real robot control."""
+import math
+import random
 import sys
-import time
+from datetime import datetime
+from threading import Thread
 
 import rclpy
-from PyQt5.QtCore import QTimer
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (QApplication, QComboBox, QFrame, QGroupBox, QHBoxLayout, QLabel,
-                             QMainWindow, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
-
+from PyQt5.QtCore import Qt, QTimer, QRectF
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QBrush
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QComboBox, QFrame, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTextEdit, QTabWidget, QMessageBox, QSplitter, QGroupBox,
+    QProgressBar, QSizePolicy
+)
 from cushion_hmi import protocol as P
+from cushion_hmi.order_server import create_order_server
 from cushion_hmi.ros_bridge import RosBridge
-from cushion_hmi.widgets import ForcePlot, ModuleGrid, StateBar
 
-BTN_STYLE = """
-QPushButton { padding: 6px 16px; border-radius: 5px; border: 1px solid #c9ced6;
-              background: #ffffff; }
-QPushButton:hover:enabled { background: #f3f4f6; }
-QPushButton:disabled { color: #a0a7b2; background: #f5f6f8; }
-QPushButton#start:enabled { background: #1f5f8b; color: white; border-color: #1f5f8b; }
-QPushButton#stop:enabled { background: #dc2626; color: white; border-color: #dc2626; }
-QPushButton#continue { background: #a86200; color: white; border-color: #a86200;
-                       font-weight: bold; }
+try:
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
+except ImportError:
+    FigureCanvas = None
+
+# ===================== USER CONFIGURATION =====================
+SOFT_K = 0.80                 # N/mm (DEMO values; replace with measured data)
+HARD_K = 1.60                 # N/mm
+K_TOLERANCE = 0.15            # N/mm
+TRAY_LAYOUT = (P.ROWS, P.COLS)  # rows, columns
+SIMULATION_MODE = True        # UI-only. Does not command a real robot.
+# ==============================================================
+SLOTS = ["M1", "M2", "M3", "M4", "M5", "M6"]
+TRAY_SLOTS = [f"T2-{i}" for i in range(1, 7)]
+INITIAL_TYPES = ["S", "H", "H", "S", "S", "H"]
+TRAY_TYPES = ["S", "S", "H", "S", "H", "H"]
+MEASURED_K = [0.80, 1.62, 1.58, 0.82, 0.79, 1.60]
+
+STYLE = """
+QMainWindow, QWidget {background:#f5f7fc; color:#1e293b; font-family:'Noto Sans CJK KR','Noto Sans',sans-serif; font-size:12px;}
+QGroupBox {background:#f9faff; border:1px solid #cbd4e4; border-radius:10px; margin-top:18px; padding:12px 8px 8px; font-weight:700; font-size:14px;}
+QGroupBox::title {subcontrol-origin:margin; left:12px; padding:0 5px;}
+QPushButton {background:#f8faff; border:1px solid #c7d1e2; border-radius:8px; padding:9px 13px; font-weight:600;}
+QPushButton:hover {background:#e9effa;}
+QPushButton:disabled {color:#9ba5b5; background:#f0f2f6;}
+QPushButton#estop {background:#dc171c; color:white; border:2px solid #b60c13; font-size:19px; font-weight:900;}
+QPushButton#estop:hover {background:#bb0e14;}
+QPushButton#selected {background:#405269; color:white; font-size:16px;}
+QTabWidget::pane {border:none;}
+QTabBar::tab {background:#edf1f9; border:1px solid #cbd4e4; border-radius:8px; padding:13px 22px; margin:2px; font-weight:700; font-size:14px;}
+QTabBar::tab:selected {background:#42536a; color:white;}
+QTableWidget {background:#fff; border:1px solid #d7deeb; gridline-color:#e1e7f0; border-radius:6px;}
+QHeaderView::section {background:#e8edf6; padding:7px; border:0; font-weight:700;}
+QTextEdit {background:white; border:1px solid #d1d9e7; border-radius:6px;}
+QComboBox {background:white; border:1px solid #cbd4e4; border-radius:6px; padding:6px;}
+QProgressBar {background:#e6ebf3; border:0; border-radius:5px; text-align:center;}
+QProgressBar::chunk {background:#56aa78; border-radius:5px;}
 """
 
+def label(text, size=12, bold=False, color=None):
+    w = QLabel(text)
+    f = w.font(); f.setPointSize(size); f.setBold(bold); w.setFont(f)
+    if color: w.setStyleSheet(f"color:{color};")
+    return w
+
+def table(headers, rows):
+    t = QTableWidget(len(rows), len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    t.verticalHeader().hide()
+    t.setEditTriggers(QTableWidget.NoEditTriggers)
+    t.setSelectionBehavior(QTableWidget.SelectRows)
+    for i, row in enumerate(rows):
+        for j, val in enumerate(row):
+            item = QTableWidgetItem(str(val))
+            item.setTextAlignment(Qt.AlignCenter if j < 3 else Qt.AlignVCenter)
+            t.setItem(i, j, item)
+    return t
+
+
+def random_shipping_address():
+    """Return a visibly fictional sample address for the UI demo."""
+    city = random.choice(("서울특별시", "부산광역시", "대전광역시", "광주광역시"))
+    district = random.choice(("강남구", "해운대구", "유성구", "북구"))
+    road = random.choice(("쿠션로", "편안길", "매트리스대로", "포근길"))
+    number = random.randint(10, 248)
+    unit = random.randint(101, 1804)
+    return random.choice((
+        f"샘플 주소 · {city} {district} {road} {number}길 {unit}호",
+        f"샘플 주소 · {city} {district} {road} {number}, {unit}동",
+        f"샘플 주소 · {city} {district} {road} {number}-{unit}",
+    ))
+
+
+class TrayDiagram(QWidget):
+    """Stylized schematic, NOT a camera image."""
+    def __init__(self, types, names, title, parent=None):
+        super().__init__(parent)
+        self.types = types; self.names = names; self.title = title
+        self.values = [None]*6
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        r = self.rect().adjusted(10, 10, -10, -10)
+        p.setPen(QPen(QColor("#aeb8c9"), 1))
+        p.setBrush(QColor("#e7d9c6")); p.drawRoundedRect(QRectF(r), 12, 12)
+        title_h = 27
+        p.setPen(QColor("#263347")); p.setFont(QFont("Sans", 10, QFont.Bold))
+        p.drawText(r.left()+13, r.top()+20, self.title)
+        x0, y0 = r.left()+r.width()*.19, r.top()+title_h+5
+        w, h = r.width()*.72, r.height()-title_h-18
+        p.setBrush(QColor("#202a35")); p.setPen(Qt.NoPen)
+        p.drawRoundedRect(QRectF(x0-9,y0-9,w+18,h+18), 9,9)
+        gap = 6
+        rows, columns = TRAY_LAYOUT
+        cw = (w - (columns - 1) * gap) / columns
+        ch = (h - (rows - 1) * gap) / rows
+        for i in range(6):
+            row, col = divmod(i, columns)
+            x = x0 + col * (cw + gap)
+            y = y0 + row * (ch + gap)
+            slot_type = self.types[i]
+            color = ("#d9ebff" if slot_type == "S" else
+                     "#ffe0df" if slot_type == "H" else
+                     "#e9ddff" if slot_type == "T" else
+                     "#f4f4f4" if slot_type == "E" else "#eef1f5")
+            p.setBrush(QColor(color)); p.setPen(QPen(QColor("#98a9be"),1))
+            p.drawRoundedRect(QRectF(x,y,cw,ch),5,5)
+            p.setPen(QColor("#17212e"))
+            p.setFont(QFont("Sans",10,QFont.Bold))
+            text = (f"{self.names[i]}\n{slot_type}" if slot_type in ("S", "H", "T")
+                    else f"{self.names[i]}\n빈칸" if slot_type == "E"
+                    else f"{self.names[i]}\n미측정" if slot_type == "?"
+                    else f"{self.names[i]}\n주문 대기")
+            if self.values[i] is not None: text+=f"\n({self.values[i]:.2f})"
+            p.drawText(QRectF(x,y,cw,ch),Qt.AlignCenter,text)
+        p.end()
+
+    def set_order(self, slots):
+        names = [f"Slot {index}" for index in range(1, 7)]
+        self.types = ["S" if slots[name] == "부드러움" else "T" if slots[name] == "높게" else "H" for name in names]
+        self.values = [P.STIFFNESS_K[slots[name]] for name in names]
+        self.update()
+
+
+class Graph(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay=QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
+        if FigureCanvas is None:
+            lay.addWidget(label("matplotlib 설치 후 힘–변위 그래프 표시",12))
+            self.canvas=None; return
+        self.fig=Figure(figsize=(5,3),dpi=95,facecolor="#f9faff")
+        self.ax=self.fig.add_subplot(111)
+        self.canvas=FigureCanvas(self.fig)
+        lay.addWidget(self.canvas)
+        self.draw_curves()
+
+    def set_real(self, curves, types=None):
+        """공정에서 받은 실제 힘-변위 곡선 {모듈번호: ([깊이], [힘])} 으로 다시 그린다."""
+        self.real = curves
+        self.real_types = types or {}
+        self.draw_curves()
+
+    def draw_curves(self):
+        if self.canvas is None: return
+        self.ax.clear()
+        colors=["#278bfa","#ed3c3c","#ff9a24","#29a653","#8952e9","#8a4d28"]
+        if getattr(self, 'real', None):
+            for mid,(xs,ys) in sorted(self.real.items()):
+                t = self.real_types.get(mid, '')
+                self.ax.plot(xs,ys,label=f"M{mid}" + (f" ({t})" if t else ''),color=colors[(mid-1)%6],linewidth=1.8)
+            self.ax.set_xlabel("압입 깊이 z [mm] (접촉점부터)",fontsize=9)
+            self.ax.set_ylabel("Fz [N]",fontsize=9)
+            self.ax.grid(True,alpha=.22)
+            self.ax.legend(fontsize=8,loc="center left",bbox_to_anchor=(1.01,.5),frameon=False)
+            self.fig.subplots_adjust(left=.13,right=.75,bottom=.2,top=.96)
+            self.canvas.draw_idle()
+            return
+        for i,(name,k) in enumerate(zip(SLOTS,MEASURED_K)):
+            xs=[j*.1 for j in range(31)]
+            ys=[k*x*(1+.04*x) * 18 for x in xs]  # Demo only; arbitrary display scaling
+            self.ax.plot(xs,ys,label=f"{name} ({INITIAL_TYPES[i]})",color=colors[i],linewidth=1.8)
+        self.ax.set_xlabel("압입 깊이 z [mm]",fontsize=9)
+        self.ax.set_ylabel("Fz [N] (시연용)",fontsize=9)
+        self.ax.grid(True,alpha=.22)
+        self.ax.legend(fontsize=8,loc="center left",bbox_to_anchor=(1.01,.5),frameon=False)
+        self.fig.subplots_adjust(left=.13,right=.75,bottom=.2,top=.96)
+        self.canvas.draw_idle()
 
 class MainWindow(QMainWindow):
-    def __init__(self, bridge):
+    def __init__(self):
         super().__init__()
+        self.setWindowTitle("협동1 쿠션 진단 HMI — UI 프로토타입")
+        self.resize(1360,780)
+        self.setStyleSheet(STYLE)
+        self.estopped=False
+        self.stock={"S":24,"H":18}
+        self.logs=[]
+        self.order = None
+        self.build()
+        self.log("시스템","HMI UI 시연 모드 시작 — ROS 2 / 로봇 연결 없음")
+
+    def build(self):
+        root=QWidget(); self.setCentralWidget(root)
+        outer=QVBoxLayout(root); outer.setContentsMargins(12,10,12,12); outer.setSpacing(8)
+        header=QHBoxLayout()
+        header.addWidget(label("매트리스 쿠션감 진단 · 모듈 교체",18,True))
+        self.status=label("● 미션 노드 대기 중",12,True,"#56657f")
+        header.addWidget(self.status); header.addStretch()
+        header.addWidget(label("모드"))
+        self.mode=QComboBox(); self.mode.addItems(["진단 + 교체","진단만","교체만"]); header.addWidget(self.mode)
+        self.start=QPushButton("▶ 시작"); self.start.clicked.connect(self.start_demo); header.addWidget(self.start)
+        self.stop=QPushButton("정지 요청"); self.stop.clicked.connect(lambda:self.log("정지","정지 요청 (시연용)")); header.addWidget(self.stop)
+        self.reset=QPushButton("초기화"); self.reset.clicked.connect(self.reset_demo); header.addWidget(self.reset)
+        self.estop=QPushButton("⚠\n비상 정지"); self.estop.setObjectName("estop")
+        self.estop.setMinimumSize(155,90); self.estop.clicked.connect(self.emergency)
+        header.addWidget(self.estop)
+        outer.addLayout(header)
+        self.tabs=QTabWidget()
+        self.tabs.addTab(self.inventory_tab(),"▣  재고 관리")
+        self.tabs.addTab(self.tray_tab(),"▦  트레이 현황")
+        self.tabs.addTab(self.rviz_tab(),"♧  작업 상태 (RViz)")
+        self.tabs.addTab(self.order_tab(),"▤  고객 주문 사항")
+        self.tabs.setCurrentIndex(1)
+        outer.addWidget(self.tabs,1)
+
+    def group(self,title,child):
+        box=QGroupBox(title); lay=QVBoxLayout(box); lay.addWidget(child); return box
+
+    def tray_tab(self):
+        page=QWidget(); lay=QVBoxLayout(page); lay.setSpacing(8)
+        top=QHBoxLayout(); top.setSpacing(8)
+        left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0)
+        self.mat_diagram=TrayDiagram(INITIAL_TYPES,SLOTS,"트레이 T01 · 매트리스")
+        self.mat_diagram.values=MEASURED_K
+        self.stock_diagram=TrayDiagram(TRAY_TYPES,TRAY_SLOTS,"트레이 T02 · 재고/예비")
+        ll.addWidget(self.group("작업 환경 현황 (모식도)",self.mat_diagram),3)
+        ll.addWidget(self.group("재고 트레이 (2 × 3)",self.stock_diagram),2)
+        top.addWidget(left,4)
+        middle=QWidget(); ml=QVBoxLayout(middle); ml.setContentsMargins(0,0,0,0)
+        self.tray_select=QComboBox(); self.tray_select.addItems(["T01 (매트리스)","T02 (재고/예비)"])
+        self.tray_select.currentIndexChanged.connect(self.update_tray_table)
+        midgroup=QGroupBox("트레이 상세 정보")
+        midlay=QVBoxLayout(midgroup); midlay.addWidget(self.tray_select)
+        self.detail=table(["슬롯","블록 타입","강성 k (N/mm)","측정 상태"],[])
+        midlay.addWidget(self.detail); ml.addWidget(midgroup,3)
+        self.tray_summary=table(["트레이","용도","슬롯 구성","상태"],[
+            ["T01","매트리스 (작업 대상)","2 × 3 (M1~M6)","측정 완료"],
+            ["T02","재고/예비","2 × 3 (T2-1~T2-6)","대기"]])
+        ml.addWidget(self.group("트레이 상태 요약",self.tray_summary),2)
+        top.addWidget(middle,4)
+        right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0)
+        self.graph=Graph(); rl.addWidget(self.group("힘–변위 그래프 (T01)",self.graph),3)
+        self.stock_table=table(["블록 타입","재고 수량","기준 강성 k"],[])
+        rl.addWidget(self.group("실리콘 블록 재고 현황",self.stock_table),2)
+        top.addWidget(right,4)
+        lay.addLayout(top,5)
+        self.log_table=table(["시간","대상","이벤트","상세 내용"],[])
+        lay.addWidget(self.group("작업 로그 (트레이 / 측정 / 교체 이력)",self.log_table),2)
+        self.update_tray_table(); self.update_stock()
+        return page
+
+    def inventory_tab(self):
+        page=QWidget(); lay=QVBoxLayout(page)
+        lay.addWidget(label("실리콘 블록 재고 관리",18,True))
+        info=label("실측 강성값, 위치별 블록 상태, 교체 이력을 관리합니다. 아래 버튼은 시연용입니다.",12)
+        lay.addWidget(info)
+        self.inventory_table=table(["블록 타입","기준 강성","가용 수량","상태"],[])
+        lay.addWidget(self.group("재고 현황",self.inventory_table),2)
+        row=QHBoxLayout()
+        self.locate=QPushButton("⌖ 바닥 블록 위치 추정 실행 (시연)")
+        self.locate.clicked.connect(lambda:self.log("위치 추정","바닥 블록 탐색 요청 (시연용, 로봇 동작 없음)"))
+        row.addWidget(self.locate); row.addStretch()
+        lay.addLayout(row)
+        self.inventory_history=QTextEdit(); self.inventory_history.setReadOnly(True)
+        lay.addWidget(self.group("재고 변경 이력",self.inventory_history),2)
+        return page
+
+    def rviz_tab(self):
+        page=QWidget(); lay=QVBoxLayout(page)
+        lay.addWidget(label("작업 상태 · RViz 연동 영역",18,True))
+        note=QLabel("RViz2 시각화 자리표시자\n\n실제 연동 시 RViz2 별도 창 실행 또는\nQt 기반 RViz 렌더 패널 통합 필요\n\n로봇 관절 상태: 미연결\n그리퍼 상태: 미연결\n현재 공정: 대기")
+        note.setAlignment(Qt.AlignCenter); note.setStyleSheet("background:#e8edf6;border:1px dashed #9aa9be;border-radius:12px;font-size:19px;color:#56657f;")
+        lay.addWidget(note,1)
+        self.progress=QProgressBar(); self.progress.setValue(0); lay.addWidget(self.progress)
+        return page
+
+    def order_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(label("고객 주문 사항",18,True))
+
+        content = QHBoxLayout()
+        self.order_diagram = TrayDiagram(
+            ["-"] * 6, SLOTS, "HTML 주문 작업 현황")
+        self.order_diagram.values = [None] * 6
+        content.addWidget(self.group("주문 구성 이미지", self.order_diagram), 3)
+
+        details = QWidget()
+        details_layout = QVBoxLayout(details)
+        self.order_number = label("주문 번호\nHTML 주문 대기 중",16,True)
+        self.order_number.setWordWrap(True)
+        details_layout.addWidget(self.group("주문 정보", self.order_number), 1)
+
+        self.order_address = QLabel(
+            "임시 배송 주소\n주문을 수신하면 샘플 주소를 생성합니다.")
+        self.order_address.setWordWrap(True)
+        self.order_address.setStyleSheet(
+            "background:white;border:1px solid #d1d9e7;border-radius:6px;padding:14px;")
+        details_layout.addWidget(self.group("배송 주소 (시연용)", self.order_address), 1)
+
+        self.order_summary = QLabel(
+            "여섯 슬롯의 강성 선택값이 주문 이미지에 반영됩니다.")
+        self.order_summary.setWordWrap(True)
+        details_layout.addWidget(self.group("슬롯 구성", self.order_summary), 2)
+        details_layout.addStretch(1)
+        content.addWidget(details, 2)
+        lay.addLayout(content, 1)
+        return page
+
+    def on_order_config(self, data):
+        slots = data.get("slots")
+        expected = {f"Slot {index}" for index in range(1, 7)}
+        if (not isinstance(slots, dict) or set(slots) != expected
+                or any(not isinstance(value, str) or value not in P.STIFFNESS_K
+                       for value in slots.values())):
+            self.log("주문 거부", "잘못된 HTML 주문 슬롯 데이터")
+            return
+
+        order_id = data.get("order_id")
+        if not isinstance(order_id, str) or not order_id or len(order_id) > 64:
+            self.log("주문 거부", "주문 번호가 없거나 올바르지 않습니다")
+            return
+
+        self.order = {"order_id": order_id, "slots": dict(slots)}
+        address = random_shipping_address()
+        self.order_diagram.set_order(slots)
+        self.order_number.setText(f"주문 번호\n{order_id}")
+        self.order_address.setText(f"샘플 배송 주소\n{address}")
+        self.order_summary.setText("\n".join(
+            f"M{index}: {slots[f'Slot {index}']} "
+            f"({P.STIFFNESS_K[slots[f'Slot {index}']]:g} N/mm)"
+            for index in range(1, 7)))
+        self.log("주문 수신", f"HTML 주문 {order_id}을 작업 현황 이미지에 반영")
+
+    def update_tray_table(self):
+        selected=self.tray_select.currentIndex()
+        real = getattr(self, 'robot_bed' if selected == 0 else 'robot_tray', None)
+        if real:
+            names = SLOTS if selected == 0 else TRAY_SLOTS
+            kind = {'S': '부드러움', 'H': '단단함', 'T': '높게', 'E': '빈칸', '?': '미측정'}
+            rows = [[names[i], kind.get(c['type'], c['type']),
+                     '-' if c.get('k') is None else f"{c['k']:.2f}",
+                     '빈칸' if c['type'] == 'E' else '측정 완료' if c['type'] != '?' else '미측정'] for i, c in enumerate(real)]
+            self.detail.setRowCount(len(rows))
+            for i,row in enumerate(rows):
+                for j,v in enumerate(row): self.detail.setItem(i,j,QTableWidgetItem(str(v)))
+            return
+        if selected==0:
+            rows=[[SLOTS[i],INITIAL_TYPES[i],f"{MEASURED_K[i]:.2f}","정상"] for i in range(6)]
+        else:
+            rows=[[TRAY_SLOTS[i],TRAY_TYPES[i],"미측정","대기"] for i in range(6)]
+        self.detail.setRowCount(6)
+        for i,row in enumerate(rows):
+            for j,v in enumerate(row): self.detail.setItem(i,j,QTableWidgetItem(str(v)))
+
+    def update_stock(self):
+        rows=[["S (부드러움)",f"{SOFT_K:.2f} N/mm",f"{self.stock['S']}개","정상"],
+              ["H (단단함)",f"{HARD_K:.2f} N/mm",f"{self.stock['H']}개","정상"]]
+        for widget in [self.inventory_table,self.stock_table]:
+            widget.setRowCount(2)
+            for i,row in enumerate(rows):
+                vals=row if widget is self.inventory_table else [row[0],row[2],row[1]]
+                for j,v in enumerate(vals): widget.setItem(i,j,QTableWidgetItem(str(v)))
+
+    def log(self,kind,detail,target="T01"):
+        tm=datetime.now().strftime("%H:%M:%S")
+        self.logs.insert(0,[tm,target,kind,detail])
+        if hasattr(self,"log_table"):
+            self.log_table.setRowCount(min(100,len(self.logs)))
+            for i,row in enumerate(self.logs[:100]):
+                for j,v in enumerate(row): self.log_table.setItem(i,j,QTableWidgetItem(v))
+        if hasattr(self,"inventory_history"):
+            self.inventory_history.append(f"[{tm}] [{kind}] {detail}")
+
+    # ── 실제 공정(bed_process) 연동 (cushion_bridge 가 /cushion/* 로 이어 줌) ─────────────
+    MODE_TO_CMD = {"진단 + 교체": "repair", "진단만": "diagnose", "교체만": "order"}
+
+    def attach_bridge(self, bridge):
         self.bridge = bridge
-        self.status = {}
-        self.last_status_time = None
-        self.setWindowTitle('협동1 쿠션 진단 HMI')
-        self.resize(1200, 780)
-        self._build()
-
-        bridge.status_received.connect(self.on_status)
-        bridge.force_received.connect(self.on_force)
-        bridge.log_received.connect(self.append_log)
-        bridge.order_config_received.connect(self.on_order_config)
-
-        self.link_timer = QTimer(self)
-        self.link_timer.timeout.connect(self.refresh_link)
-        self.link_timer.start(500)
-        self.refresh_link()
-        self.append_log('[HMI] 시작. 미션 노드의 /cushion/status 를 기다리는 중')
-
-    # ------------------------------------------------------------------ 화면 구성
-    def _build(self):
-        root = QWidget()
-        root.setStyleSheet(BTN_STYLE)
-        self.setCentralWidget(root)
-        v = QVBoxLayout(root)
-        v.setContentsMargins(16, 12, 16, 12)
-        v.setSpacing(10)
-
-        # 상단: 제목, 연결 상태, 모드, 버튼
-        top = QHBoxLayout()
-        title = QLabel('매트리스 쿠션감 진단 · 모듈 교체')
-        title.setFont(QFont(self.font().family(), 15, QFont.Bold))
-        top.addWidget(title)
-        top.addSpacing(16)
-        self.link_label = QLabel()
-        top.addWidget(self.link_label)
-        top.addStretch(1)
-        self.info_label = QLabel()
-        self.info_label.setStyleSheet('color: #4b5563;')
-        top.addWidget(self.info_label)
-        top.addSpacing(16)
-        top.addWidget(QLabel('모드'))
-        self.mode_combo = QComboBox()
-        for key, text in P.MODES:
-            self.mode_combo.addItem(text, key)
-        self.mode_combo.setCurrentIndex(P.MODE_KEYS.index('full'))
-        top.addWidget(self.mode_combo)
-        self.btn_start = QPushButton('시작')
-        self.btn_start.setObjectName('start')
-        self.btn_stop = QPushButton('정지 요청')
-        self.btn_stop.setObjectName('stop')
-        self.btn_stop.setToolTip('미션 노드에 정지를 요청합니다. 비상시에는 펜던트·비상정지 버튼을 쓰세요.')
-        self.btn_reset = QPushButton('초기화')
-        for b in (self.btn_start, self.btn_stop, self.btn_reset):
-            top.addWidget(b)
-        self.btn_start.clicked.connect(self.on_start)
-        self.btn_stop.clicked.connect(self.on_stop)
-        self.btn_reset.clicked.connect(self.on_reset)
-        v.addLayout(top)
-
-        # 플로우 단계
-        self.state_bar = StateBar()
-        v.addWidget(self.state_bar)
-
-        # 브라우저에서 전달된 침대 슬롯 설정
-        order_box = QGroupBox('브라우저 주문 설정')
-        order_layout = QVBoxLayout(order_box)
-        self.order_config_label = QLabel(
-            'HTML에서 슬롯을 선택하고 ADD TO CART를 누르면 여기에 표시됩니다.')
-        self.order_config_label.setWordWrap(True)
-        order_layout.addWidget(self.order_config_label)
-        v.addWidget(order_box)
-
-        # 작업자 확인 배너 (수동 단계)
-        self.prompt_frame = QFrame()
-        self.prompt_frame.setStyleSheet(
-            'QFrame { background: #fbefdc; border: 1px solid #e3b26b; border-radius: 6px; }'
-            'QLabel { border: none; color: #6b3f00; font-weight: bold; }')
-        ph = QHBoxLayout(self.prompt_frame)
-        ph.setContentsMargins(14, 8, 8, 8)
-        self.prompt_label = QLabel()
-        ph.addWidget(self.prompt_label, 1)
-        self.btn_continue = QPushButton('작업 완료 · 계속')
-        self.btn_continue.setObjectName('continue')
-        self.btn_continue.clicked.connect(self.on_continue)
-        ph.addWidget(self.btn_continue)
-        self.prompt_frame.hide()
-        v.addWidget(self.prompt_frame)
-
-        # 알람 배너
-        self.alarm_label = QLabel()
-        self.alarm_label.setStyleSheet(
-            'background: #fee2e2; color: #991b1b; border: 1px solid #f19999;'
-            'border-radius: 6px; padding: 8px 14px; font-weight: bold;')
-        self.alarm_label.setWordWrap(True)
-        self.alarm_label.hide()
-        v.addWidget(self.alarm_label)
-
-        # 가운데: 모듈 격자 | 그래프
-        mid = QHBoxLayout()
-        mid.setSpacing(12)
-        g1 = QGroupBox('모듈 상태 (가로 2 × 세로 3)')
-        l1 = QVBoxLayout(g1)
-        self.grid = ModuleGrid()
-        l1.addWidget(self.grid)
-        mid.addWidget(g1, 4)
-
-        g2 = QGroupBox('힘–변위 (압입 측정)')
-        self.plot_box = g2
-        l2 = QVBoxLayout(g2)
-        self.plot = ForcePlot()
-        l2.addWidget(self.plot, 1)
-        self.readout = QLabel('모듈 —   깊이 — mm   Fz — N')
-        self.readout.setStyleSheet('font-family: monospace; font-size: 13px; color: #1f2937;')
-        l2.addWidget(self.readout)
-        mid.addWidget(g2, 5)
-        v.addLayout(mid, 1)
-
-        # 아래: 로그
-        g3 = QGroupBox('로그')
-        l3 = QVBoxLayout(g3)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(1000)
-        self.log.setStyleSheet('font-family: monospace; font-size: 12px;')
-        self.log.setFixedHeight(150)
-        l3.addWidget(self.log)
-        v.addWidget(g3)
-
-    # ------------------------------------------------------------------ 수신 처리
-    def on_status(self, d):
-        self.status = d
-        self.last_status_time = time.monotonic()
-        self.state_bar.set_state(d.get('state'))
-        self.grid.set_modules(d.get('modules', []), d.get('current_module'))
-
-        if d.get('wait_operator'):
-            self.prompt_label.setText('작업자 확인 필요: ' + (d.get('prompt') or ''))
-            self.prompt_frame.show()
-            self.btn_continue.setEnabled(True)
-        else:
-            self.prompt_frame.hide()
-
-        alarm = d.get('alarm') or ''
-        self.alarm_label.setText('⚠ ' + alarm)
-        self.alarm_label.setVisible(bool(alarm))
-
-        if d.get('running') and d.get('mode') in P.MODE_KEYS:
-            self.mode_combo.setCurrentIndex(P.MODE_KEYS.index(d['mode']))
-
-        parts = []
-        if d.get('control') is False:
-            parts.append('표시 전용 (조작은 터미널에서)')
-        if d.get('spares') is not None:
-            parts.append(f'선반 재고 {d["spares"]}')
-        if d.get('retry'):
-            parts.append(f'재시도 {d["retry"]}')
-        self.info_label.setText('   '.join(parts))
-        self.refresh_link()
-
-    def on_force(self, d):
-        # 압입 측정은 z(깊이), 정지 측정은 t(시간)를 가로축으로 쓴다
-        kind = 'depth' if 'z' in d else 'time'
+        self.robot = None                # 마지막 /cushion/status
+        self.curves = {}
+        bridge.status_received.connect(self.on_robot_status)
+        bridge.force_received.connect(self.on_robot_force)
+        bridge.log_received.connect(lambda text: self.log("공정", text))
         try:
-            mid, fz = int(d['module']), float(d['fz'])
-            x = float(d['z'] if kind == 'depth' else d['t'])
-        except (KeyError, TypeError, ValueError):
-            return
-        self.plot.add_point(mid, x, fz, bool(d.get('reset')), kind)
-        self.plot_box.setTitle('힘–변위 (압입 측정)' if kind == 'depth' else '힘 (정지 측정, 시간축)')
-        xs = f'깊이 {x:6.2f} mm' if kind == 'depth' else f'시간 {x:6.2f} s'
-        self.readout.setText(f'모듈 M{mid}   {xs}   Fz {fz:7.2f} N')
+            self.stop.clicked.disconnect()
+        except TypeError:
+            pass
+        self.stop.clicked.connect(self.on_stop)
 
-    def on_order_config(self, d):
-        slots = d.get('slots')
-        if (not isinstance(slots, dict)
-                or set(slots) != {f'Slot {i}' for i in range(1, 7)}
-                or any(
-                    not isinstance(value, str) or value not in P.STIFFNESS_K
-                    for value in slots.values())):
-            self.append_log('[HMI] 잘못된 브라우저 주문 설정을 수신했습니다')
-            return
-        summary = '   '.join(
-            f'{name}: {P.STIFFNESS_K[slots[name]]:g} N/mm' for name in sorted(
-                slots, key=lambda name: int(name.split()[-1])))
-        order_id = d.get('order_id') or 'ID 없음'
-        self.order_config_label.setText(f'주문 {order_id}   |   {summary}')
-        self.append_log(f'[HMI] 브라우저 주문 설정 수신 ({order_id})')
-
-    def append_log(self, text):
-        self.log.appendPlainText(time.strftime('%H:%M:%S  ') + text)
-
-    def connected(self):
-        return (self.last_status_time is not None
-                and time.monotonic() - self.last_status_time < P.STATUS_TIMEOUT)
-
-    def refresh_link(self):
-        alive = self.connected()
-        running = alive and bool(self.status.get('running'))
-        # control=false 인 발행자(예: measure_teach_force)는 HMI 명령을 받지 않으므로 버튼을 끈다
-        control = self.status.get('control', True) is not False
-        source = self.status.get('source') or '미션 노드'
-        if alive:
-            self.link_label.setText(f'● {source} 연결됨')
-            self.link_label.setStyleSheet('color: #22a05a; font-weight: bold;')
-        elif self.last_status_time is None:
-            self.link_label.setText('● 미션 노드 대기 중')
-            self.link_label.setStyleSheet('color: #6b7280; font-weight: bold;')
-        else:
-            self.link_label.setText(f'● {source} 응답 없음')
-            self.link_label.setStyleSheet('color: #dc2626; font-weight: bold;')
-        self.btn_start.setEnabled(alive and control and not running)
-        self.btn_reset.setEnabled(alive and control and not running)
-        self.btn_stop.setEnabled(control and running)
-        self.mode_combo.setEnabled(control and not running)
-
-    # ------------------------------------------------------------------ 버튼
-    def on_start(self):
-        mode = self.mode_combo.currentData()
-        self.plot.clear()
-        self.bridge.send_cmd('start', mode=mode)
-        self.append_log(f'[HMI] 시작 요청 (모드: {self.mode_combo.currentText()})')
-        self.btn_start.setEnabled(False)
+    def robot_connected(self):
+        import time as _t
+        return self.robot is not None and _t.monotonic() - self.robot_time < P.STATUS_TIMEOUT
 
     def on_stop(self):
-        self.bridge.send_cmd('stop')
-        self.append_log('[HMI] 정지 요청')
+        if getattr(self, 'bridge', None) is not None:
+            self.bridge.send_cmd('stop')
+        self.log("정지", "공정에 정지 요청")
 
-    def on_reset(self):
-        self.plot.clear()
-        self.bridge.send_cmd('reset')
-        self.append_log('[HMI] 초기화 요청')
+    def on_robot_status(self, d):
+        import time as _t
+        self.robot, self.robot_time = d, _t.monotonic()
+        step, name = d.get('step') or 0, d.get('step_name') or ''
+        state = P.STATE_LABELS.get(d.get('state'), d.get('state'))
+        text = f"● bed_process 연결 · {state}" + (f" · {step}단계 {name}" if d.get('running') else '')
+        color = "#c81d25" if d.get('state') == 'FAULT' else "#21824c"
+        self.status.setText(text); self.status.setStyleSheet(f"color:{color};")
+        if hasattr(self, 'progress'):
+            self.progress.setValue(100 if d.get('state') == 'DONE' else int(step * 100 / 9))
+        self.start.setEnabled(not d.get('running') and not self.estopped)
+        bed, tray = d.get('bed_map'), d.get('tray_map')
+        mods = {m.get('id'): m for m in d.get('modules') or []}
+        if bed:
+            self.mat_diagram.types = [c['type'] for c in bed]
+            self.mat_diagram.values = [c['k'] for c in bed]
+        elif mods:
+            self.mat_diagram.values = [mods.get(i + 1, {}).get('k') for i in range(6)]
+        self.mat_diagram.update()
+        if tray:
+            self.stock_diagram.types = [c['type'] for c in tray]
+            self.stock_diagram.values = [c['k'] for c in tray]
+            self.stock_diagram.update()
+        self.robot_bed, self.robot_tray = bed, tray
+        self.update_tray_table()
+        if d.get('alarm') and d.get('alarm') != getattr(self, '_last_alarm', None):
+            self._last_alarm = d['alarm']
+            self.log("알림", d['alarm'])
 
-    def on_continue(self):
-        self.bridge.send_cmd('continue')
-        self.append_log('[HMI] 작업 완료 · 계속')
-        self.btn_continue.setEnabled(False)  # 다음 status 가 올 때까지 중복 클릭 방지
+    def on_robot_force(self, d):
+        try:
+            mid, z, fz = int(d['module']), float(d['z']), float(d['fz'])
+        except (KeyError, TypeError, ValueError):
+            return
+        if d.get('reset') or mid not in self.curves:
+            self.curves[mid] = ([], [])
+        self.curves[mid][0].append(z); self.curves[mid][1].append(fz)
+        if not hasattr(self, '_graph_timer'):
+            self._graph_timer = QTimer(self); self._graph_timer.setSingleShot(True)
+            self._graph_timer.timeout.connect(self._redraw_graph)
+        self._graph_timer.start(200)            # 점이 몰려 올 때 한 번만 다시 그린다
+
+    def _redraw_graph(self):
+        bed = getattr(self, 'robot_bed', None) or []
+        types = {i + 1: c['type'] for i, c in enumerate(bed)}
+        self.graph.set_real(self.curves, types)
+
+    def start_demo(self):
+        if getattr(self, 'bridge', None) is not None and self.robot_connected():
+            mode = self.MODE_TO_CMD.get(self.mode.currentText(), 'repair')
+            self.curves = {}
+            self.bridge.send_cmd('start', mode=mode)
+            self.log("시작", f"{self.mode.currentText()} 공정 시작 요청 ({mode})")
+            self.start.setEnabled(False)
+            return
+        if self.estopped:
+            QMessageBox.warning(self,"비상정지 상태","시연 상태가 비상정지로 잠겨 있습니다.")
+            return
+        self.status.setText("● 시연 중"); self.status.setStyleSheet("color:#21824c;")
+        self.log("시작",f"{self.mode.currentText()} 시연 시작")
+        self.progress.setValue(25)
+
+    def reset_demo(self):
+        if self.estopped:
+            QMessageBox.warning(self,"비상정지 상태","실제 장비의 안전상태 확인 없이 재가동할 수 없습니다.")
+            return
+        self.progress.setValue(0); self.status.setText("● 미션 노드 대기 중")
+        self.log("초기화","UI 상태 초기화")
+
+    def emergency(self):
+        self.estopped=True
+        self.start.setEnabled(False); self.reset.setEnabled(False)
+        self.status.setText("● 비상정지 요청 (UI 시연)")
+        self.status.setStyleSheet("color:#c81d25;")
+        self.log("비상정지","UI 비상정지 버튼 눌림 — 실제 안전회로와 미연결")
+        QMessageBox.critical(self,"비상정지 (시연)","UI 동작이 잠겼습니다.\n\n주의: 이 버튼은 실제 로봇 비상정지 회로에 연결되지 않았습니다.\n실제 장비는 인증된 물리적 E-STOP으로 정지해야 합니다.")
 
 
 def main(args=None):
     rclpy.init(args=args)
     app = QApplication(sys.argv)
     bridge = RosBridge()
-    win = MainWindow(bridge)
-    win.show()
-    bridge.start()
-
-    # Ctrl+C 로 종료되게: Qt 루프가 파이썬 시그널 처리 기회를 주도록 주기적으로 깨운다
-    signal.signal(signal.SIGINT, lambda *_: app.quit())
-    wake = QTimer()
-    wake.timeout.connect(lambda: None)
-    wake.start(200)
-
-    code = app.exec_()
-    bridge.shutdown()
-    if rclpy.ok():
-        rclpy.shutdown()
-    sys.exit(code)
+    win = MainWindow()
+    bridge.order_config_received.connect(win.on_order_config)
+    win.attach_bridge(bridge)                 # 실제 공정 상태·그래프·시작/정지 연결 (bed_inspect cushion_bridge)
+    server = None
+    server_thread = None
+    bridge_started = False
+    try:
+        bridge.start()
+        bridge_started = True
+        win.show()
+        try:
+            server = create_order_server(
+                bridge.node, bridge.pub_order_config)
+        except OSError as exc:
+            message = (
+                f'주문 서버를 시작하지 못했습니다 '
+                f'(http://127.0.0.1:5000/order): {exc}')
+            bridge.node.get_logger().error(message)
+            win.status.setText('● 주문 서버 시작 실패')
+            win.status.setStyleSheet('color:#c81d25;')
+            win.log('주문 서버 오류', message)
+        else:
+            server_thread = Thread(
+                target=server.serve_forever, daemon=True)
+            server_thread.start()
+            bridge.node.get_logger().info(
+                '브라우저 주문 서버 실행: http://127.0.0.1:5000/order')
+        return app.exec_()
+    finally:
+        if server_thread is not None and server_thread.is_alive():
+            server.shutdown()
+        if server is not None:
+            server.server_close()
+        if bridge_started:
+            bridge.shutdown()
+        else:
+            bridge.node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

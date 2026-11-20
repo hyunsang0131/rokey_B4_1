@@ -241,6 +241,9 @@ class MockMission(Node):
         self.set_state('INIT')
         yield from self.sleep(0.8)
 
+        self.set_state('TENSION')
+        yield from self.ask('천을 팽팽하게 조절한 뒤 [작업 완료 · 계속]을 누르세요')
+
         self.set_state('MEASURE')
         for mid in ids:
             yield from self.measure(mid)
@@ -268,6 +271,8 @@ class MockMission(Node):
             return
 
         while True:
+            self.set_state('RELEASE')
+            yield from self.ask('천을 느슨하게 풀어 주세요')
             self.set_state('COVER_OPEN')
             yield from self.ask('커버를 열어 주세요')
 
@@ -298,6 +303,8 @@ class MockMission(Node):
 
             self.set_state('COVER_CLOSE')
             yield from self.ask('커버를 닫아 주세요')
+            self.set_state('TENSION')
+            yield from self.ask('천을 팽팽하게 조절한 뒤 [작업 완료 · 계속]을 누르세요')
             if not replaced:
                 break
 

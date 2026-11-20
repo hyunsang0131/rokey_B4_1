@@ -23,7 +23,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.utilities import remove_ros_args
 from std_msgs.msg import String
 
-from bed_inspect.cushion_bridge import LAST_ORDER_TOPIC, TOPIC_ORDER, order_to_profile
+from bed_inspect.cushion_bridge import LAST_ORDER_TOPIC, PROFILE_KO, TOPIC_ORDER, order_to_profile
 
 LATCH = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 END_STATES = ('done', 'warning', 'error', 'stopped')
@@ -164,7 +164,7 @@ def main(args=None):
                 order = r.order
             profile = order_to_profile(order, slot_map)
             print(f'주문 {order.get("order_id")}: ' +
-                  ', '.join(f'{i + 1}번 {"부드럽게" if p == "soft" else "단단하게"}' for i, p in enumerate(profile)))
+                  ', '.join(f'{i + 1}번 {PROFILE_KO.get(p, p)}' for i, p in enumerate(profile)))
             cmd = {'cmd': 'start', 'mode': 'repair', 'target': 'user', 'profile': profile}
         if opt.confirm and cmd.get('cmd') == 'start':
             cmd['confirm'] = True

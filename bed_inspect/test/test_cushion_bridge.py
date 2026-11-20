@@ -40,3 +40,10 @@ def test_status_mapping():
     assert s['state'] == 'CONFIRM' and s['wait_operator'] and s['prompt'] == '확인하세요'
     s = cb.to_cushion_status(dict(bed, state='error', message='오류'), [1, 2, 3, 4, 5, 6])
     assert s['state'] == 'FAULT' and s['alarm'] == '오류' and not s['running']
+
+
+def test_order_tall_from_web():
+    """웹 HIGH(키 큰 큐브) → '높게' → 공정 profile 'tall'."""
+    order = {'order_id': 'TW-1', 'slots': {'Slot 1': '높게', 'Slot 2': '높게', 'Slot 3': '단단함',
+                                           'Slot 4': '단단함', 'Slot 5': '부드러움', 'Slot 6': '단단함'}}
+    assert cb.order_to_profile(order, [1, 2, 3, 4, 5, 6]) == ['tall', 'tall', 'hard', 'hard', 'soft', 'hard']

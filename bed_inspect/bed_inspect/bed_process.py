@@ -133,6 +133,7 @@ class BedProcess:
         # 강성 맵 (2026-11-20 형님): launch 한 번 동안 기억. 침대·트레이 칸마다 {'k', 'empty', 'tall', 'too_soft', 'src'}.
         # 처음 한 번 재고, 그 뒤로는 맵으로 판단·교체하며 옮길 때마다 고친다. 공정을 새로 켜면 비어 있다 (다시 잰다)
         self.map = {'bed': None, 'tray': None}
+        self.tall_dz = None
         self.xy = []
         self.inv = bed_store.load_inventory()
         self.world = bed_store._load_json('world.json', {'cover_open': False, 'uncertain': False})
@@ -154,6 +155,7 @@ class BedProcess:
         self.status['inventory'] = {'bed': self.inv['bed'], 'rack': self.inv['rack']}
         self.status['world'] = self.world
         self.status['calib'] = self.calib
+        self.status['map'] = getattr(self, 'map', None)       # 강성 맵 (침대·트레이, 화면 표시용)
         self.status['stamp'] = time.time()
         self.io.send_status(self.status)
 
@@ -365,6 +367,8 @@ class BedProcess:
     # ── 9단계 파이프라인 ─────────────────────────────────────────────
     def _pipeline(self, mode, cmd, tcp):
         from bed_inspect.bed_robot import BedError
+        # 높은 큐브 판별(z)은 주문 모드(target user)에서만. 첫 불량 검사(자동 보수)·측정에서는 높이를 보지 않는다 (2026-11-20 형님)
+        self.tall_dz = cfg.TALL_DZ if (mode == 'repair' and cmd.get('target', 'auto') == 'user') else None
         if mode == 'repair':
             profile = cmd.get('profile')
             if cmd.get('target', 'auto') == 'user' and (
@@ -469,7 +473,7 @@ class BedProcess:
             self.log(f'재측정: 고친 칸 {[i + 1 for i in only]}번만 다시 잽니다 (나머지는 맵 값)')
         blocks2, tilt2 = self._measure('second', cfg.STEP_REMEASURE, only)
         if mode == 'repair' and cfg.REPAIR_STYLE == 'repair_test':
-            bed_math.find_empties(blocks2, cfg.EMPTY_DZ, cfg.TALL_DZ)
+            bed_math.find_empties(blocks2, cfg.EMPTY_DZ, self.tall_dz)
             self._map_store('bed', blocks2, 'remeasure')
             for b in blocks2:
                 b['grade'] = None                       # 판정은 _finish_repair 가 다시 한다
@@ -510,7 +514,7 @@ class BedProcess:
             self.log(f'보관대 {j + 1}번 살짝 닿기: {z} (경계 {res["thr"]:.2f} N, 노이즈 σ {res["sigma"]:.2f} N)')
             plan['rack'].append({'slot': j + 1, 'k': None, 'k_bed': None, 'note': res['note'], 'z0': res['z0']})
             self.publish(plan=plan)
-        bed_math.find_empties(touch, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        bed_math.find_empties(touch, cfg.EMPTY_DZ, self.tall_dz)
         zs = sorted(r['z0'] for r in touch if r['z0'] is not None)
         z_ref = zs[len(zs) // 2] if zs else None
         for r, p in zip(touch, plan['rack']):
@@ -540,7 +544,7 @@ class BedProcess:
             plan['rack'][n].update(k=res['k'], k_bed=res['k_bed'], note=res['note'])
             self.publish(plan=plan)
         # 누른 결과까지 합쳐 다시 판정 (높은 큐브는 닿은 높이, 나머지는 표면 높이로)
-        bed_math.find_empties(out, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        bed_math.find_empties(out, cfg.EMPTY_DZ, self.tall_dz)
         for r, t in zip(out, touch):
             r['tall'] = r['tall'] or t['tall']
         return out
@@ -550,7 +554,7 @@ class BedProcess:
         if plan['target_mode'] == 'auto' and cfg.REPAIR_STYLE == 'repair_test':
             from pjt_test1.repair_test import judge_bed
             return judge_bed(blocks, cfg.REPAIR_RATIO)
-        empties = bed_math.find_empties(blocks, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        empties = bed_math.find_empties(blocks, cfg.EMPTY_DZ, self.tall_dz)
         if plan['target_mode'] == 'user':
             mism = bed_math.judge_profile(blocks, plan['profile'], plan['thr'], plan['centers'])
         else:
@@ -660,7 +664,7 @@ class BedProcess:
             self.step(cfg.STEP_CHECK, '저장된 트레이 맵 사용 (이번 launch 에서 이미 잼)')
             tray = self._blocks_from_map('tray')
             self.log('트레이 맵: ' + self._map_text('tray'))
-            return tray, bed_math.find_empties(tray, cfg.EMPTY_DZ, cfg.TALL_DZ)
+            return tray, bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz)
         self._rt_use('tray')
         tray = []
         for j in range(len(cfg.P_RACK)):
@@ -671,7 +675,7 @@ class BedProcess:
             self.log(f'  트레이 {j + 1}번: {k}' + (f' ({res.get("note")})' if res.get('note') else ''))
             tray.append(res)
         self._rt_use('bed')
-        tray_empty = bed_math.find_empties(tray, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        tray_empty = bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz)
         self._map_store('tray', tray, 'measure')
         return tray, tray_empty
 
@@ -719,17 +723,20 @@ class BedProcess:
             cell['z'] = None                            # 다른 자리로 옮겼으니 윗면 높이는 그 자리 기준으로 모름
             self.map[side[dk]][di] = cell
 
-    def _set_measured_inventory(self, bed_empties, tray_empty):
-        """재고 기록을 이번에 잰 것으로 맞춘다 (빈칸 = None, 큐브 = 기록된 높이 또는 보통 높이)."""
-        self.inv['bed'] = [None if i in bed_empties else (self.inv['bed'][i] or cfg.H_REF) for i in range(len(cfg.P_BED))]
-        self.inv['rack'] = [None if j in tray_empty else (self.inv['rack'][j] or cfg.H_REF) for j in range(len(cfg.P_RACK))]
+    def _set_measured_inventory(self, bed_empties, tray_empty, blocks=None, tray=None):
+        """재고 기록을 이번에 잰 것으로 맞춘다 (빈칸 = None, 큐브 = 보통 높이, z 로 높다고 판별된 큐브 = TALL_HEIGHT).
+        높이가 맞아야 잡으러 내려가는 깊이가 맞는다 (키 큰 큐브는 그만큼 덜 내려감)."""
+        def h(b):
+            return cfg.TALL_HEIGHT if (b is not None and b.get('tall')) else cfg.H_REF
+        self.inv['bed'] = [None if i in bed_empties else h(blocks[i] if blocks else None) for i in range(len(cfg.P_BED))]
+        self.inv['rack'] = [None if j in tray_empty else h(tray[j] if tray else None) for j in range(len(cfg.P_RACK))]
         bed_store.save_inventory(self.inv)
 
     def _plan_order_rt(self, blocks, plan):
         """주문(사용자 지정)을 repair_test 측정으로: 말랑한 큐브를 불량으로 보지 않고, 칸마다 주문한 종류
         (부드러움/단단함)와 다르면 교체한다. 종류 경계는 침대 + 트레이에서 잰 강성을 repair_test 비율(--ratio)로 나눠 정한다."""
         from bed_inspect.bed_robot import BedError
-        bed_empties = bed_math.find_empties(blocks, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        bed_empties = bed_math.find_empties(blocks, cfg.EMPTY_DZ, self.tall_dz)
         if self.map['bed'] is None:
             self._map_store('bed', blocks, 'measure')
         tray, tray_empty = self._press_tray_rt()
@@ -766,7 +773,7 @@ class BedProcess:
         except PlanError as e:
             self.tasks.home()
             raise BedError(str(e))
-        self._set_measured_inventory(empties, tray_empty)
+        self._set_measured_inventory(empties, tray_empty, blocks, tray)
         moves = bed_math.plan_repair_moves(self.inv['bed'], self.inv['rack'], assign, mism)
         k_of = {r['slot'] - 1: r['k_bed'] for r in racked}
         plan.update(choice=[{'slot': i + 1, 'rack': j + 1, 'k_bed': k_of[j],
@@ -788,7 +795,7 @@ class BedProcess:
                 'empties': [], 'mismatch': [], 'rack': [], 'choice': [], 'moves': [], 'done': 0}
         if cfg.REPAIR_STYLE == 'repair_test':
             return self._plan_order_rt(blocks, plan) if user else self._plan_repair_rt(blocks, plan)
-        bed_math.find_empties(blocks, cfg.EMPTY_DZ, cfg.TALL_DZ)
+        bed_math.find_empties(blocks, cfg.EMPTY_DZ, self.tall_dz)
         nodata = [b['slot'] for b in blocks if b['grade'] == 'nodata']
         if nodata:
             self.tasks.home()

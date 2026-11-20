@@ -57,8 +57,7 @@ def _setup(context):
              additional_env=env),
         Node(package='bed_inspect', executable='cushion_bridge', output='screen',
              parameters=[{'auto_start': get('auto_start').lower() in ('1', 'true', 'yes')}]),
-        Node(package='cushion_hmi', executable='order_server', output='screen',
-             parameters=[{'host': get('host'), 'port': int(get('port'))}]),
+        # 웹 주문 서버는 cushion_hmi 최종판(test 브랜치)의 hmi 가 직접 띄운다 (127.0.0.1:5000) → 따로 띄우지 않는다
         Node(package='cushion_hmi', executable='hmi', output='screen'),
     ]
     if virtual and not os.path.exists(teach):
