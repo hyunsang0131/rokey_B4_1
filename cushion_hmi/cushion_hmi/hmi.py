@@ -4,6 +4,7 @@ import math
 import random
 import sys
 from datetime import datetime
+from threading import Thread
 
 import rclpy
 from PyQt5.QtCore import Qt, QTimer, QRectF
@@ -15,6 +16,7 @@ from PyQt5.QtWidgets import (
     QProgressBar, QSizePolicy
 )
 from cushion_hmi import protocol as P
+from cushion_hmi.order_server import create_order_server
 from cushion_hmi.ros_bridge import RosBridge
 
 try:
@@ -27,7 +29,7 @@ except ImportError:
 SOFT_K = 0.80                 # N/mm (DEMO values; replace with measured data)
 HARD_K = 1.60                 # N/mm
 K_TOLERANCE = 0.15            # N/mm
-TRAY_LAYOUT = (2, 3)          # rows, columns
+TRAY_LAYOUT = (P.ROWS, P.COLS)  # rows, columns
 SIMULATION_MODE = True        # UI-only. Does not command a real robot.
 # ==============================================================
 SLOTS = ["M1", "M2", "M3", "M4", "M5", "M6"]
@@ -113,10 +115,14 @@ class TrayDiagram(QWidget):
         w, h = r.width()*.72, r.height()-title_h-18
         p.setBrush(QColor("#202a35")); p.setPen(Qt.NoPen)
         p.drawRoundedRect(QRectF(x0-9,y0-9,w+18,h+18), 9,9)
-        gap = 6; cw=(w-2*gap)/3; ch=(h-gap)/2
+        gap = 6
+        rows, columns = TRAY_LAYOUT
+        cw = (w - (columns - 1) * gap) / columns
+        ch = (h - (rows - 1) * gap) / rows
         for i in range(6):
-            row,col=divmod(i,3)
-            x=x0+col*(cw+gap); y=y0+row*(ch+gap)
+            row, col = divmod(i, columns)
+            x = x0 + col * (cw + gap)
+            y = y0 + row * (ch + gap)
             slot_type = self.types[i]
             color = ("#d9ebff" if slot_type == "S" else
                      "#ffe0df" if slot_type == "H" else "#eef1f5")
@@ -373,21 +379,50 @@ class MainWindow(QMainWindow):
         self.log("비상정지","UI 비상정지 버튼 눌림 — 실제 안전회로와 미연결")
         QMessageBox.critical(self,"비상정지 (시연)","UI 동작이 잠겼습니다.\n\n주의: 이 버튼은 실제 로봇 비상정지 회로에 연결되지 않았습니다.\n실제 장비는 인증된 물리적 E-STOP으로 정지해야 합니다.")
 
+
 def main(args=None):
     rclpy.init(args=args)
     app = QApplication(sys.argv)
     bridge = RosBridge()
     win = MainWindow()
     bridge.order_config_received.connect(win.on_order_config)
-    bridge.start()
-    win.show()
+    server = None
+    server_thread = None
+    bridge_started = False
     try:
+        bridge.start()
+        bridge_started = True
+        win.show()
+        try:
+            server = create_order_server(
+                bridge.node, bridge.pub_order_config)
+        except OSError as exc:
+            message = (
+                f'주문 서버를 시작하지 못했습니다 '
+                f'(http://127.0.0.1:5000/order): {exc}')
+            bridge.node.get_logger().error(message)
+            win.status.setText('● 주문 서버 시작 실패')
+            win.status.setStyleSheet('color:#c81d25;')
+            win.log('주문 서버 오류', message)
+        else:
+            server_thread = Thread(
+                target=server.serve_forever, daemon=True)
+            server_thread.start()
+            bridge.node.get_logger().info(
+                '브라우저 주문 서버 실행: http://127.0.0.1:5000/order')
         return app.exec_()
     finally:
-        bridge.shutdown()
+        if server_thread is not None and server_thread.is_alive():
+            server.shutdown()
+        if server is not None:
+            server.server_close()
+        if bridge_started:
+            bridge.shutdown()
+        else:
+            bridge.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
 
-if __name__=="__main__":
+if __name__ == '__main__':
     sys.exit(main())

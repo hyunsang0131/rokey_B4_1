@@ -92,12 +92,18 @@ def make_handler(node, publisher):
     return OrderHandler
 
 
+def create_order_server(node, publisher):
+    """Create the local HTTP server that publishes browser orders to ROS."""
+    return ThreadingHTTPServer(
+        (HOST, PORT), make_handler(node, publisher))
+
+
 def main(args=None):
     """Run the local HTTP server and publish validated orders to ROS 2."""
     rclpy.init(args=args)
     node = Node('cushion_order_server')
     publisher = node.create_publisher(String, P.TOPIC_ORDER_CONFIG, 10)
-    server = ThreadingHTTPServer((HOST, PORT), make_handler(node, publisher))
+    server = create_order_server(node, publisher)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     node.get_logger().info(f'주문 서버 실행: http://{HOST}:{PORT}/order')

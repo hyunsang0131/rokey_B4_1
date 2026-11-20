@@ -422,6 +422,7 @@
 
       const [showFactoryDrawer, setShowFactoryDrawer] = useState(false);
       const [currentOrder, setCurrentOrder] = useState(null);
+      const [orderDelivery, setOrderDelivery] = useState(null);
       const [factoryStepIdx, setFactoryStepIdx] = useState(0);
 
       // 메인 히어로 자동 슬라이드 & 3D 모듈 변화 애니메이션 타이머
@@ -526,6 +527,49 @@
         }
       };
 
+      const sendOrderToHmi = async (order) => {
+        const slots = Object.fromEntries(
+          order.modules.map((module) => [
+            `Slot ${module.cell_id}`,
+            module.hardness_code === '10A' ? '부드러움' : '단단함',
+          ])
+        );
+
+        setOrderDelivery({
+          orderId: order.order_id,
+          status: 'sending',
+          message: 'HMI로 주문을 전송하고 있습니다...',
+        });
+
+        try {
+          const response = await fetch('http://127.0.0.1:5000/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              order_id: order.order_id,
+              created_at: order.timestamp,
+              slots,
+            }),
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+          }
+          setOrderDelivery({
+            orderId: order.order_id,
+            status: 'sent',
+            message: '주문 서버가 접수했습니다. ROS 연결된 HMI에 표시됩니다.',
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          setOrderDelivery({
+            orderId: order.order_id,
+            status: 'failed',
+            message: `HMI 전송 실패: ${reason} (HMI가 실행 중인지, HTML과 같은 PC인지 확인하세요)`,
+          });
+        }
+      };
+
       const handleSubmitOrder = () => {
         const orderedIds = [1, 2, 3, 4, 5, 6];
         const orderedModules = orderedIds.map((id) => {
@@ -566,6 +610,7 @@
         window.TEAMWON_LATEST_ORDER = payload;
         console.log('[TEAMWON ROBOT ORDER]', payload);
 
+        void sendOrderToHmi(payload);
         setCurrentOrder(payload);
         setFactoryStepIdx(0);
         setSelectedBed(null);
@@ -1409,6 +1454,22 @@
                           </span>
                         </div>
                       </div>
+
+                      {orderDelivery?.orderId === currentOrder.order_id && (
+                        <div
+                          role="status"
+                          aria-live="polite"
+                          className={`p-3 border text-[12px] ${
+                            orderDelivery.status === 'sent'
+                              ? 'border-green-200 bg-green-50 text-green-800'
+                              : orderDelivery.status === 'failed'
+                              ? 'border-red-200 bg-red-50 text-red-800'
+                              : 'border-[#E5E5E5] bg-white text-[#666666]'
+                          }`}
+                        >
+                          {orderDelivery.message}
+                        </div>
+                      )}
 
                       <div>
                         <h4 className="text-[12px] font-semibold text-[#767676] mb-2">

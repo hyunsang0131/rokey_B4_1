@@ -31,24 +31,19 @@ ros2 run cushion_hmi mock_mission --ros-args -p defects:="[2,5]" -p spares:=2 -p
 ros2 run cushion_hmi hmi
 ```
 
-브라우저 주문값을 HMI에 표시하려면 같은 ROS 환경에서 터미널 두 개를 열어 각각 실행합니다.
-
-터미널 1:
-
-```bash
-ros2 run cushion_hmi order_server
-```
-
-터미널 2:
+브라우저 주문 HTTP 서버는 HMI가 시작할 때 함께 실행됩니다. ROS 2 환경에서 HMI를 실행합니다.
 
 ```bash
 ros2 run cushion_hmi hmi
 ```
 
-그다음 `bed_ordering.html`을 브라우저에서 열고 여섯 슬롯을 선택해 `ADD TO CART`를 누릅니다.
-`order_server`는 `127.0.0.1:5000`에서만 요청을 받습니다. HMI 상단의 "고객 주문 사항" 탭에는
+그다음 `bed_ordering.html`을 브라우저에서 열고 여섯 슬롯을 구성한 뒤 `나만의 침대 주문하기`를 누릅니다.
+주문서에 전송 성공/실패가 표시되고, 성공하면 HMI 상단의 "고객 주문 사항" 탭에
 주문 번호, 슬롯별 강성 선택을 반영한 트레이 그림, 임시로 생성한 샘플 배송 주소가
-표시됩니다. HTML에서 배송 주소를 보내지는 않으며, 주소는 주문을 받을 때마다 새로 생성됩니다.
+표시됩니다. HMI는 `127.0.0.1:5000`에서 요청을 받으므로 HTML과 HMI는 같은 PC에서 실행해야 합니다.
+주문 서버만 따로 사용하려면 `ros2 run cushion_hmi order_server`를 실행할 수 있지만,
+HMI와 동시에 실행하면 포트가 겹치므로 함께 실행하지 마세요.
+HTML에서 배송 주소를 보내지는 않으며, 주소는 주문을 받을 때마다 새로 생성됩니다.
 HTML과 주문 서버는 슬롯 선택값을
 `부드러움`/`단단함` 문자열로 주고받고, HMI가 화면 표시 시에만 `protocol.py`의 강성값으로
 변환합니다. `/cushion/order_config`의 `slots` 값도 원래 문자열을 유지합니다.
