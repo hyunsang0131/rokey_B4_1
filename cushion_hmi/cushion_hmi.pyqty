@@ -1,0 +1,821 @@
+import sys
+import random
+import math
+from datetime import datetime
+from PyQt5 import QtWidgets, QtCore, QtGui
+
+
+# ==============================================================================
+# 1. 실시간 접촉 강성(Stiffness [N/mm]) 그래프 위젯
+# ==============================================================================
+class RealtimeStiffnessGraph(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = [1.2 + random.uniform(0.0, 0.5) for _ in range(90)]
+        self.max_val = 30.0
+        self.limit_val = 25.0
+        self.setMinimumHeight(170)
+
+    def add_point(self, val):
+        self.history.append(val)
+        if len(self.history) > 90:
+            self.history.pop(0)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # 라운드 화이트 배경
+        rect = QtCore.QRectF(1, 1, w - 2, h - 2)
+        painter.setBrush(QtGui.QColor("#ffffff"))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#dbe4ee"), 1.5))
+        painter.drawRoundedRect(rect, 10, 10)
+
+        # 가로 계측 눈금선 및 우측 라벨
+        painter.setFont(QtGui.QFont("Noto Sans KR", 8, QtGui.QFont.Bold))
+        for i in range(1, 5):
+            y = int((h * i) / 5)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#e2e8f0"), 1))
+            painter.drawLine(8, y, w - 8, y)
+
+            label_val = int(self.max_val * (1 - i / 5))
+            painter.setPen(QtGui.QColor("#94a3b8"))
+            painter.drawText(w - 28, y - 3, f"{label_val}")
+
+        # 25.0 N/mm 과부하 임계선
+        thresh_y = int(h - (self.limit_val / self.max_val) * (h - 28) - 12)
+        pen_thresh = QtGui.QPen(QtGui.QColor("#ef4444"), 1.2, QtCore.Qt.DashLine)
+        painter.setPen(pen_thresh)
+        painter.drawLine(8, thresh_y, w - 8, thresh_y)
+
+        painter.setPen(QtGui.QColor("#dc2626"))
+        painter.setFont(QtGui.QFont("Noto Sans KR", 8, QtGui.QFont.Bold))
+        painter.drawText(12, thresh_y - 4, f"LIMIT {self.limit_val:.1f} N/mm")
+
+        # 접촉 강성 곡선 그리기
+        if len(self.history) > 1:
+            path = QtGui.QPainterPath()
+            for idx, val in enumerate(self.history):
+                x = 8 + (idx / (len(self.history) - 1)) * (w - 16)
+                y = h - (min(val, self.max_val) / self.max_val) * (h - 28) - 12
+                if idx == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#16a34a"), 2.2))
+            painter.drawPath(path)
+
+        # 상단 실시간 디지털 수치
+        curr_val = self.history[-1] if self.history else 0.0
+        painter.setPen(QtGui.QColor("#0f172a"))
+        painter.setFont(QtGui.QFont("Noto Sans KR", 9, QtGui.QFont.Bold))
+        painter.drawText(12, 20, f"CONTACT: {curr_val:.2f} N/mm")
+
+
+# ==============================================================================
+# 2. 물체 위치 추정 지도 프론트엔드 위젯 (상단 로봇 / 좌하단 침대 / 우하단 트레이)
+# ==============================================================================
+class PositionEstimationMap(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.predicted_points = [
+            (0.20, 0.58, "Bed#1"),
+            (0.34, 0.74, "Bed#4"),
+            (0.66, 0.66, "Tray#2")
+        ]
+        self.tcp_pos = (0.50, 0.55)
+        self.setMinimumHeight(190)
+
+    def update_state(self, tcp_ratio_xy, detected_list=None):
+        self.tcp_pos = tcp_ratio_xy
+        if detected_list is not None:
+            self.predicted_points = detected_list
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # 라운드 화이트 배경
+        painter.setBrush(QtGui.QColor("#ffffff"))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#dbe4ee"), 1.5))
+        painter.drawRoundedRect(QtCore.QRectF(1, 1, w - 2, h - 2), 10, 10)
+
+        # 좌표 격자
+        painter.setPen(QtGui.QPen(QtGui.QColor("#f1f5f9"), 1))
+        for i in range(1, 6):
+            painter.drawLine(int(w * i / 6), 4, int(w * i / 6), h - 4)
+            painter.drawLine(4, int(h * i / 6), w - 4, int(h * i / 6))
+
+        # 좌하단 BED ZONE
+        bed_rect = QtCore.QRectF(w * 0.08, h * 0.36, w * 0.36, h * 0.56)
+        painter.setBrush(QtGui.QColor(2, 132, 199, 16))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#7dd3fc"), 1.5))
+        painter.drawRoundedRect(bed_rect, 8, 8)
+        painter.setPen(QtGui.QColor("#0369a1"))
+        painter.setFont(QtGui.QFont("Noto Sans KR", 8, QtGui.QFont.Bold))
+        painter.drawText(int(w * 0.11), int(h * 0.44), "BED ZONE")
+
+        # 우하단 TRAY ZONE
+        tray_rect = QtCore.QRectF(w * 0.52, h * 0.46, w * 0.40, h * 0.46)
+        painter.setBrush(QtGui.QColor(217, 119, 6, 16))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#fcd34d"), 1.5))
+        painter.drawRoundedRect(tray_rect, 8, 8)
+        painter.setPen(QtGui.QColor("#b45309"))
+        painter.drawText(int(w * 0.55), int(h * 0.54), "TRAY ZONE")
+
+        # 예측 물체 좌표 점
+        for rx, ry, label in self.predicted_points:
+            px, py = int(rx * w), int(ry * h)
+            painter.setBrush(QtGui.QColor(249, 115, 22, 60))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawEllipse(QtCore.QPoint(px, py), 9, 9)
+
+            painter.setBrush(QtGui.QColor("#f97316"))
+            painter.drawEllipse(QtCore.QPoint(px, py), 5, 5)
+
+            painter.setPen(QtGui.QColor("#334155"))
+            painter.drawText(px + 8, py + 4, label)
+
+        # 상단 중앙 ROBOT 원점 -> TCP 링크
+        robot_x, robot_y = int(w * 0.50), int(h * 0.16)
+        tcp_x, tcp_y = int(self.tcp_pos[0] * w), int(self.tcp_pos[1] * h)
+
+        painter.setPen(QtGui.QPen(QtGui.QColor("#0284c7"), 2.4))
+        painter.drawLine(robot_x, robot_y, tcp_x, tcp_y)
+
+        # ROBOT 베이스 블록
+        painter.setBrush(QtGui.QColor("#0f172a"))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawRoundedRect(QtCore.QRectF(robot_x - 26, robot_y - 11, 52, 22), 6, 6)
+        painter.setPen(QtGui.QColor("#38bdf8"))
+        painter.drawText(QtCore.QRectF(robot_x - 26, robot_y - 11, 52, 22), QtCore.Qt.AlignCenter, "ROBOT")
+
+        # TCP 포인트
+        painter.setBrush(QtGui.QColor("#2563eb"))
+        painter.drawEllipse(QtCore.QPoint(tcp_x, tcp_y), 6, 6)
+        painter.setPen(QtGui.QColor("#1d4ed8"))
+        painter.drawText(tcp_x + 8, tcp_y + 4, "TCP")
+
+
+# ==============================================================================
+# 3. 주문 침대 배치 상세 미리보기 팝업 다이얼로그
+# ==============================================================================
+class OrderPreviewDialog(QtWidgets.QDialog):
+    def __init__(self, order_data, parent=None):
+        super().__init__(parent)
+        self.order_data = order_data
+        self.execute_requested = False
+        self.setWindowTitle(f"주문 침대 배치 상세 미리보기 - {order_data['id']}")
+        self.setFixedSize(440, 470)
+        self.setStyleSheet("""
+            QDialog { background-color: #f8fafc; font-family: 'Noto Sans KR', sans-serif; }
+            QLabel { color: #0f172a; }
+        """)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # 헤더 배너
+        header = QtWidgets.QFrame()
+        header.setStyleSheet("background-color: #0284c7; border-radius: 12px; padding: 8px;")
+        h_layout = QtWidgets.QHBoxLayout(header)
+        lbl_title = QtWidgets.QLabel("📋 주문 침대 배치 상세 미리보기")
+        lbl_title.setStyleSheet("color: white; font-weight: bold; font-size: 14px;")
+        lbl_id = QtWidgets.QLabel(self.order_data["id"])
+        lbl_id.setStyleSheet("color: white; background-color: rgba(255,255,255,0.2); border-radius: 10px; padding: 3px 10px; font-weight: bold;")
+        h_layout.addWidget(lbl_title)
+        h_layout.addStretch()
+        h_layout.addWidget(lbl_id)
+        layout.addWidget(header)
+
+        # 요약 정보
+        cubes = self.order_data["cubes"]
+        summary_text = (
+            f"접수 시각: {self.order_data['time']}   |   "
+            f"Hard {cubes.count('Hard')} · Soft {cubes.count('Soft')} · Soft High {cubes.count('Soft High')}"
+        )
+        lbl_summary = QtWidgets.QLabel(summary_text)
+        lbl_summary.setStyleSheet("background-color: white; border: 1.5px solid #cbd5e1; border-radius: 10px; padding: 8px 12px; font-weight: bold; color: #0369a1;")
+        layout.addWidget(lbl_summary)
+
+        # 침대 2x3 배치 시각화 박스
+        bed_frame = QtWidgets.QFrame()
+        bed_frame.setStyleSheet("background-color: #e2e8f0; border: 2px solid #94a3b8; border-radius: 14px; padding: 10px;")
+        grid = QtWidgets.QGridLayout(bed_frame)
+        grid.setSpacing(8)
+
+        color_map = {
+            "Hard": ("#2563eb", "18.8N/mm / 25.0mm"),
+            "Soft": ("#16a34a", "6.4N/mm / 25.0mm"),
+            "Soft High": ("#7c3aed", "7.5N/mm / 35.0mm"),
+        }
+
+        for idx in range(6):
+            num = idx + 1
+            c_type = cubes[idx]
+            bg, spec = color_map.get(c_type, ("#64748b", "0.0N/mm / 0.0mm"))
+            cell = QtWidgets.QLabel(f"[{num}] {c_type}\n{spec}")
+            cell.setAlignment(QtCore.Qt.AlignCenter)
+            cell.setMinimumHeight(68)
+            cell.setStyleSheet(f"""
+                background-color: {bg};
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            """)
+            grid.addWidget(cell, idx // 2, idx % 2)
+
+        layout.addWidget(bed_frame)
+
+        # 하단 버튼
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_close = QtWidgets.QPushButton("닫기")
+        btn_close.setMinimumHeight(40)
+        btn_close.setStyleSheet("background-color: #e2e8f0; color: #334155; border-radius: 10px; font-weight: bold;")
+        btn_close.clicked.connect(self.reject)
+
+        btn_exec = QtWidgets.QPushButton("▶ 이 주문 바로 실행하기")
+        btn_exec.setMinimumHeight(40)
+        btn_exec.setStyleSheet("background-color: #16a34a; color: white; border-radius: 10px; font-weight: bold; font-size: 13px;")
+        btn_exec.clicked.connect(self._on_execute)
+
+        btn_row.addWidget(btn_close, 1)
+        btn_row.addWidget(btn_exec, 2)
+        layout.addLayout(btn_row)
+
+    def _on_execute(self):
+        self.execute_requested = True
+        self.accept()
+
+
+# ==============================================================================
+# 4. 설비 예외상황(ALARM) 팝업 다이얼로그
+# ==============================================================================
+class ExceptionAlarmDialog(QtWidgets.QDialog):
+    def __init__(self, err_code, description, timestamp, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"설비 예외상황 발생 [{err_code}]")
+        self.setFixedSize(430, 290)
+        self.setStyleSheet("QDialog { background-color: #ffffff; font-family: 'Noto Sans KR', sans-serif; }")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QLabel(f"🚨 설비 예외상황 발생 (ALARM)   [{err_code}]")
+        header.setStyleSheet("background-color: #dc2626; color: white; border-radius: 10px; padding: 10px; font-weight: bold; font-size: 14px;")
+        layout.addWidget(header)
+
+        info = QtWidgets.QLabel(
+            f"• 발생 시각: {timestamp}\n"
+            f"• 제어 상태: 로봇 모션 인터록 정지 (LOCKED)\n\n"
+            f"• 원인 상세:\n  {description}"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("background-color: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 12px; color: #991b1b; font-weight: bold;")
+        layout.addWidget(info)
+
+        btn_reset = QtWidgets.QPushButton("알람 확인 및 리셋 (RESET & RECOVER)")
+        btn_reset.setMinimumHeight(42)
+        btn_reset.setStyleSheet("background-color: #dc2626; color: white; border-radius: 10px; font-weight: bold; font-size: 13px;")
+        btn_reset.clicked.connect(self.accept)
+        layout.addWidget(btn_reset)
+
+
+# ==============================================================================
+# 5. 메인 HMI 윈도우 (화이트 라운드 베이스 & 실물 배치도 규격)
+# ==============================================================================
+class Coop1MainHMI(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("협동-1 매트릭스 자동화 운전화면 [DOOSAN M0609 HMI]")
+        self.resize(1440, 880)
+
+        # 상태 데이터
+        self.bed_data = {i: {"type": "미측정", "stiffness": 0.0, "height": 0.0} for i in range(1, 7)}
+        self.tray_data = {i: {"type": "미측정", "stiffness": 0.0, "height": 0.0} for i in range(1, 7)}
+        self.orders = []
+        self.order_counter = 1
+        self.swap_selection = None
+        self.is_locked = False
+        self.spike_val = 0.0
+        self.sim_tick = 0
+
+        self._apply_global_style()
+        self._build_ui()
+
+        # 초기 웹 주문 샘플 2건 추가 (리스트 등록만 하고 자동 실행하지 않음)
+        self.receive_web_order(["Hard", "Soft", "Soft High", "Hard", "Soft", "Hard"])
+        self.receive_web_order(["Soft High", "Soft High", "Hard", "Soft", "Hard", "Soft"])
+
+        # 타이머 (시계 및 실시간 센서/위치 추정 스트림)
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self._on_tick)
+        self.timer.start(80)
+
+        self.add_log("협동-1 HMI 운전화면 초기화 완료. 웹 주문 및 사용자 실행 대기 중...")
+
+    def _apply_global_style(self):
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #eef2f6;
+                font-family: 'Noto Sans KR', 'Pretendard', sans-serif;
+            }
+            QFrame#HmiPanel {
+                background-color: #ffffff;
+                border: 1.5px solid #cbd5e1;
+                border-radius: 14px;
+            }
+            QFrame#HmiInset {
+                background-color: #f8fafc;
+                border: 1.5px solid #dbe4ee;
+                border-radius: 12px;
+            }
+            QLabel#SectionTitle {
+                color: #0f172a;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton {
+                border-radius: 9px;
+                font-weight: bold;
+                padding: 6px 10px;
+            }
+            QListWidget, QTextEdit {
+                background-color: #ffffff;
+                border: 1.5px solid #dbe4ee;
+                border-radius: 10px;
+                color: #1e293b;
+                padding: 4px;
+            }
+        """)
+
+    def _build_ui(self):
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root_layout = QtWidgets.QVBoxLayout(central)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
+
+        # -------------------- 1. 상단 헤더 바 --------------------
+        header_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        header_layout = QtWidgets.QHBoxLayout(header_panel)
+        header_layout.setContentsMargins(14, 8, 14, 8)
+
+        badge_logo = QtWidgets.QLabel("COOP-1 HMI")
+        badge_logo.setStyleSheet("background-color: #0f172a; color: #38bdf8; border-radius: 11px; padding: 3px 10px; font-weight: bold;")
+        lbl_header = QtWidgets.QLabel("운전화면  |  협동-1 매트릭스 자동화 [DOOSAN M0609]")
+        lbl_header.setStyleSheet("font-size: 15px; font-weight: bold; color: #0f172a;")
+
+        btn_sim_order = QtWidgets.QPushButton("+ 웹 주문 수신")
+        btn_sim_order.setStyleSheet("background-color: #f1f5f9; color: #1e293b; border: 1px solid #cbd5e1;")
+        btn_sim_order.clicked.connect(lambda: self.receive_web_order(
+            [random.choice(["Hard", "Soft", "Soft High"]) for _ in range(6)]
+        ))
+
+        btn_sim_swap = QtWidgets.QPushButton("⇄ 빠른 교체 테스트")
+        btn_sim_swap.setStyleSheet("background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd;")
+        btn_sim_swap.clicked.connect(self.quick_swap_demo)
+
+        btn_sim_err = QtWidgets.QPushButton("⚠ 예외테스트")
+        btn_sim_err.setStyleSheet("background-color: #fee2e2; color: #b91c1c; border: 1px solid #fecaca;")
+        btn_sim_err.clicked.connect(lambda: self.trigger_exception("ERR-305", "그리퍼 파지 강성 이상 및 목표 높이 불일치 감지 (Bed #2)"))
+
+        self.lbl_status_pill = QtWidgets.QLabel("● IDLE")
+        self.lbl_status_pill.setStyleSheet("background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 4px 12px; color: #b45309; font-weight: bold;")
+
+        self.lbl_clock = QtWidgets.QLabel(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
+        self.lbl_clock.setStyleSheet("background-color: #f1f5f9; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 4px 12px; color: #1e293b; font-weight: bold;")
+
+        header_layout.addWidget(badge_logo)
+        header_layout.addWidget(lbl_header)
+        header_layout.addStretch()
+        header_layout.addWidget(btn_sim_order)
+        header_layout.addWidget(btn_sim_swap)
+        header_layout.addWidget(btn_sim_err)
+        header_layout.addWidget(self.lbl_status_pill)
+        header_layout.addWidget(self.lbl_clock)
+        root_layout.addWidget(header_panel)
+
+        # -------------------- 2. 메인 2단 그리드 (좌측 67% / 우측 33%) --------------------
+        main_grid = QtWidgets.QHBoxLayout()
+        main_grid.setSpacing(8)
+
+        # ==================== 좌측 영역 ====================
+        left_col = QtWidgets.QVBoxLayout()
+        left_col.setSpacing(8)
+
+        # [좌측 상단] 작업영역 모니터링 (상단 중앙 로봇 / 좌하단 침대 / 우하단 교체 트레이)
+        ws_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        ws_layout = QtWidgets.QVBoxLayout(ws_panel)
+        ws_layout.setContentsMargins(12, 10, 12, 12)
+
+        ws_top_bar = QtWidgets.QHBoxLayout()
+        ws_title = QtWidgets.QLabel("■ 작업영역 모니터링 (실물 배치도 - FLOORPLAN)", objectName="SectionTitle")
+        ws_legend = QtWidgets.QLabel("■ Hard   ■ Soft   ■ Soft High   |   셀 2개 순차 클릭 시 즉시 교체")
+        ws_legend.setStyleSheet("color: #475569; font-size: 11px; font-weight: bold;")
+        ws_top_bar.addWidget(ws_title)
+        ws_top_bar.addStretch()
+        ws_top_bar.addWidget(ws_legend)
+        ws_layout.addLayout(ws_top_bar)
+
+        floorplan_inset = QtWidgets.QFrame(objectName="HmiInset")
+        fp_layout = QtWidgets.QVBoxLayout(floorplan_inset)
+        fp_layout.setContentsMargins(14, 12, 14, 12)
+        fp_layout.setSpacing(10)
+
+        # 상단 중앙: 로봇 베이스
+        robot_row = QtWidgets.QHBoxLayout()
+        robot_row.addStretch()
+        robot_box = QtWidgets.QFrame()
+        robot_box.setMinimumWidth(340)
+        robot_box.setStyleSheet("background-color: #ffffff; border: 2px solid #94a3b8; border-radius: 14px; padding: 6px 12px;")
+        rb_layout = QtWidgets.QHBoxLayout(robot_box)
+        rb_badge = QtWidgets.QLabel("로봇")
+        rb_badge.setStyleSheet("background-color: #0f172a; color: #38bdf8; border-radius: 9px; padding: 4px 10px; font-weight: bold;")
+        self.lbl_robot_detail = QtWidgets.QLabel("DOOSAN M0609  |  대기 중 (IDLE)")
+        self.lbl_robot_detail.setStyleSheet("font-weight: bold; color: #0f172a;")
+        self.lbl_tcp_coord = QtWidgets.QLabel("TCP: HOME")
+        self.lbl_tcp_coord.setStyleSheet("color: #0284c7; font-weight: bold; font-size: 11px;")
+        rb_layout.addWidget(rb_badge)
+        rb_layout.addWidget(self.lbl_robot_detail)
+        rb_layout.addStretch()
+        rb_layout.addWidget(self.lbl_tcp_coord)
+        robot_row.addWidget(robot_box)
+        robot_row.addStretch()
+        fp_layout.addLayout(robot_row)
+
+        # 하단 좌측(세로형 침대 2x3) + 하단 우측(가로형 교체 트레이 2x3)
+        zones_row = QtWidgets.QHBoxLayout()
+        zones_row.setSpacing(18)
+
+        # 좌하단: 침대 (BED 2x3)
+        bed_col = QtWidgets.QVBoxLayout()
+        lbl_bed_hdr = QtWidgets.QLabel("침대 (BED 2×3)")
+        lbl_bed_hdr.setAlignment(QtCore.Qt.AlignCenter)
+        lbl_bed_hdr.setStyleSheet("color: #0369a1; font-weight: bold; font-size: 13px;")
+        bed_frame = QtWidgets.QFrame()
+        bed_frame.setStyleSheet("background-color: #e2e8f0; border: 2px solid #94a3b8; border-radius: 14px; padding: 8px;")
+        bed_grid = QtWidgets.QGridLayout(bed_frame)
+        bed_grid.setSpacing(8)
+        self.bed_buttons = {}
+        for idx in range(6):
+            num = idx + 1
+            btn = QtWidgets.QPushButton(f"[{num}] 미측정\n0.0N/mm / 0.0mm")
+            btn.setMinimumHeight(64)
+            btn.clicked.connect(lambda _, n=num: self._on_cell_clicked("bed", n))
+            bed_grid.addWidget(btn, idx // 2, idx % 2)
+            self.bed_buttons[num] = btn
+        bed_col.addWidget(lbl_bed_hdr)
+        bed_col.addWidget(bed_frame)
+
+        # 우하단: 교체 트레이 (STORAGE TRAY 2x3)
+        tray_col = QtWidgets.QVBoxLayout()
+        tray_col.addStretch()
+        lbl_tray_hdr = QtWidgets.QLabel("교체 트레이 (STORAGE TRAY 2×3)")
+        lbl_tray_hdr.setAlignment(QtCore.Qt.AlignCenter)
+        lbl_tray_hdr.setStyleSheet("color: #b45309; font-weight: bold; font-size: 13px;")
+        tray_frame = QtWidgets.QFrame()
+        tray_frame.setStyleSheet("background-color: #e2e8f0; border: 2px solid #94a3b8; border-radius: 14px; padding: 8px;")
+        tray_grid = QtWidgets.QGridLayout(tray_frame)
+        tray_grid.setSpacing(8)
+        self.tray_buttons = {}
+        for idx in range(6):
+            num = idx + 1
+            btn = QtWidgets.QPushButton(f"[{num}] 미측정\n0.0N/mm / 0.0mm")
+            btn.setMinimumHeight(52)
+            btn.clicked.connect(lambda _, n=num: self._on_cell_clicked("tray", n))
+            tray_grid.addWidget(btn, idx // 2, idx % 2)
+            self.tray_buttons[num] = btn
+        tray_col.addWidget(lbl_tray_hdr)
+        tray_col.addWidget(tray_frame)
+
+        zones_row.addLayout(bed_col, 5)
+        zones_row.addLayout(tray_col, 6)
+        fp_layout.addLayout(zones_row)
+        ws_layout.addWidget(floorplan_inset)
+        left_col.addWidget(ws_panel, 62)
+
+        # [좌측 하단] 고객 주문 리스트 + 실시간 로그
+        bottom_left_row = QtWidgets.QHBoxLayout()
+        bottom_left_row.setSpacing(8)
+
+        # 고객 주문 리스트 패널
+        order_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        order_layout = QtWidgets.QVBoxLayout(order_panel)
+        order_layout.setContentsMargins(10, 8, 10, 10)
+        order_hdr = QtWidgets.QHBoxLayout()
+        order_hdr.addWidget(QtWidgets.QLabel("■ 고객 주문 리스트 (클릭 시 배치 미리보기)", objectName="SectionTitle"))
+        self.lbl_order_cnt = QtWidgets.QLabel("대기: 0건")
+        self.lbl_order_cnt.setStyleSheet("color: #0369a1; font-weight: bold;")
+        order_hdr.addStretch()
+        order_hdr.addWidget(self.lbl_order_cnt)
+        order_layout.addLayout(order_hdr)
+
+        self.list_orders = QtWidgets.QListWidget()
+        self.list_orders.itemClicked.connect(self._on_order_item_clicked)
+        order_layout.addWidget(self.list_orders)
+
+        btn_exec_order = QtWidgets.QPushButton("▶ 선택된 주문 실행하기")
+        btn_exec_order.setMinimumHeight(38)
+        btn_exec_order.setStyleSheet("background-color: #16a34a; color: white; font-size: 13px;")
+        btn_exec_order.clicked.connect(self.execute_selected_order)
+        order_layout.addWidget(btn_exec_order)
+
+        # 실시간 로그 패널
+        log_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        log_layout = QtWidgets.QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(10, 8, 10, 10)
+        log_hdr = QtWidgets.QHBoxLayout()
+        log_hdr.addWidget(QtWidgets.QLabel("■ 실시간 특징 감지 및 작업 로그", objectName="SectionTitle"))
+        btn_clear_log = QtWidgets.QPushButton("지우기")
+        btn_clear_log.setStyleSheet("background-color: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; padding: 2px 8px;")
+        btn_clear_log.clicked.connect(lambda: self.text_log.clear())
+        log_hdr.addStretch()
+        log_hdr.addWidget(btn_clear_log)
+        log_layout.addLayout(log_hdr)
+
+        self.text_log = QtWidgets.QTextEdit()
+        self.text_log.setReadOnly(True)
+        log_layout.addWidget(self.text_log)
+
+        bottom_left_row.addWidget(order_panel, 5)
+        bottom_left_row.addWidget(log_panel, 7)
+        left_col.addLayout(bottom_left_row, 38)
+
+        # ==================== 우측 영역 ====================
+        right_col = QtWidgets.QVBoxLayout()
+        right_col.setSpacing(8)
+
+        # [우측 상단] 시스템 상시 제어반 고정
+        ctrl_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        ctrl_layout = QtWidgets.QVBoxLayout(ctrl_panel)
+        ctrl_layout.setContentsMargins(10, 8, 10, 10)
+        ctrl_layout.addWidget(QtWidgets.QLabel("■ 시스템 상시 제어반 (FIXED PANEL)", objectName="SectionTitle"))
+
+        ctrl_btns = QtWidgets.QHBoxLayout()
+        ctrl_btns.setSpacing(6)
+        btn_specs = [
+            ("시작", "#2563eb", self.handle_start),
+            ("정지", "#d97706", self.handle_stop),
+            ("요청", "#475569", self.handle_request_probing),
+            ("초기화", "#64748b", self.handle_reset),
+            ("비상정지", "#dc2626", self.handle_estop),
+        ]
+        for label, bg, callback in btn_specs:
+            b = QtWidgets.QPushButton(label)
+            b.setMinimumHeight(40)
+            b.setStyleSheet(f"background-color: {bg}; color: white; font-size: 13px;")
+            b.clicked.connect(callback)
+            ctrl_btns.addWidget(b)
+        ctrl_layout.addLayout(ctrl_btns)
+        right_col.addWidget(ctrl_panel, 1)
+
+        # [우측 중단] 실시간 접촉 힘 그래프 (Stiffness [N/mm])
+        force_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        force_layout = QtWidgets.QVBoxLayout(force_panel)
+        force_layout.setContentsMargins(10, 8, 10, 10)
+        f_hdr = QtWidgets.QHBoxLayout()
+        f_hdr.addWidget(QtWidgets.QLabel("■ 실시간 접촉 힘 그래프 (Stiffness [N/mm])", objectName="SectionTitle"))
+        btn_spike = QtWidgets.QPushButton("터치 강성 테스트")
+        btn_spike.setStyleSheet("background-color: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; padding: 2px 8px; font-size: 11px;")
+        btn_spike.clicked.connect(lambda: setattr(self, "spike_val", 18.6))
+        f_hdr.addStretch()
+        f_hdr.addWidget(btn_spike)
+        force_layout.addLayout(f_hdr)
+
+        self.force_graph = RealtimeStiffnessGraph()
+        force_layout.addWidget(self.force_graph)
+        right_col.addWidget(force_panel, 4)
+
+        # [우측 하단] 물체 위치 추정 지도
+        map_panel = QtWidgets.QFrame(objectName="HmiPanel")
+        map_layout = QtWidgets.QVBoxLayout(map_panel)
+        map_layout.setContentsMargins(10, 8, 10, 10)
+        map_layout.addWidget(QtWidgets.QLabel("■ 물체 위치 추정 지도 (그리퍼 궤적 & 예측 좌표)", objectName="SectionTitle"))
+
+        self.pos_map = PositionEstimationMap()
+        map_layout.addWidget(self.pos_map)
+        right_col.addWidget(map_panel, 5)
+
+        main_grid.addLayout(left_col, 67)
+        main_grid.addLayout(right_col, 33)
+        root_layout.addLayout(main_grid)
+
+        self._refresh_matrix_ui()
+
+    # ==========================================================================
+    # 매트릭스 UI 갱신 및 빠른 셀 교체
+    # ==========================================================================
+    def _refresh_matrix_ui(self):
+        style_map = {
+            "Hard": ("#2563eb", "#ffffff"),
+            "Soft": ("#16a34a", "#ffffff"),
+            "Soft High": ("#7c3aed", "#ffffff"),
+            "미측정": ("#ffffff", "#475569"),
+        }
+        for zone_name, data_dict, btn_dict in [
+            ("bed", self.bed_data, self.bed_buttons),
+            ("tray", self.tray_data, self.tray_buttons),
+        ]:
+            for num, btn in btn_dict.items():
+                info = data_dict[num]
+                bg, fg = style_map.get(info["type"], ("#ffffff", "#475569"))
+                is_sel = (self.swap_selection == (zone_name, num))
+                border = "3px solid #f59e0b" if is_sel else "1.5px solid rgba(15, 23, 42, 0.16)"
+                btn.setStyleSheet(f"""
+                    background-color: {bg};
+                    color: {fg};
+                    border: {border};
+                    border-radius: 10px;
+                    font-weight: bold;
+                    font-size: 12px;
+                """)
+                btn.setText(f"[{num}] {info['type']}\n{info['stiffness']:.1f}N/mm / {info['height']:.1f}mm")
+
+    def _on_cell_clicked(self, zone, num):
+        if self.is_locked:
+            self.trigger_exception("ERR-102", "설비가 알람 잠금 상태입니다. 먼저 알람을 해제하십시오.")
+            return
+        if self.swap_selection is None:
+            self.swap_selection = (zone, num)
+            self._refresh_matrix_ui()
+            self.add_log(f"교체 원본 선택: {zone.upper()}[{num}]")
+            return
+
+        src_zone, src_num = self.swap_selection
+        if (src_zone, src_num) == (zone, num):
+            self.swap_selection = None
+            self._refresh_matrix_ui()
+            return
+
+        src_dict = self.bed_data if src_zone == "bed" else self.tray_data
+        dst_dict = self.bed_data if zone == "bed" else self.tray_data
+        src_dict[src_num], dst_dict[num] = dst_dict[num].copy(), src_dict[src_num].copy()
+        self.swap_selection = None
+        self._refresh_matrix_ui()
+        self.add_log(f"데이터 즉시 스왑 완료: {src_zone.upper()}[{src_num}] ⇄ {zone.upper()}[{num}]")
+
+    def quick_swap_demo(self):
+        if self.bed_data[1]["type"] == "미측정":
+            self.handle_request_probing()
+        self.bed_data[1], self.tray_data[2] = self.tray_data[2].copy(), self.bed_data[1].copy()
+        self._refresh_matrix_ui()
+        self.add_log("빠른 교체 테스트: BED[1] ⇄ TRAY[2] 강성·높이 데이터 즉시 갱신")
+
+    # ==========================================================================
+    # 웹 주문 수신, 배치 미리보기 팝업, 수동 실행 승인
+    # ==========================================================================
+    def receive_web_order(self, cubes):
+        order_id = f"ORD-{self.order_counter:03d}"
+        self.order_counter += 1
+        order_obj = {
+            "id": order_id,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "cubes": cubes
+        }
+        self.orders.append(order_obj)
+        self._refresh_order_list()
+        self.add_log(f"웹 주문 수신 ({order_id}) - 사용자 실행 승인 대기 중")
+
+    def _refresh_order_list(self):
+        self.list_orders.clear()
+        self.lbl_order_cnt.setText(f"대기: {len(self.orders)}건")
+        for order in self.orders:
+            item = QtWidgets.QListWidgetItem(f"[{order['id']}] ({order['time']})  구성: {' / '.join(order['cubes'])}")
+            item.setData(QtCore.Qt.UserRole, order)
+            self.list_orders.addItem(item)
+
+    def _on_order_item_clicked(self, item):
+        order_data = item.data(QtCore.Qt.UserRole)
+        if not order_data:
+            return
+        self.add_log(f"주문 배치 미리보기 열람: [{order_data['id']}]")
+        dlg = OrderPreviewDialog(order_data, self)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted and dlg.execute_requested:
+            self.execute_selected_order()
+
+    def execute_selected_order(self):
+        if self.is_locked:
+            self.trigger_exception("ERR-102", "설비가 알람 잠금 상태입니다.")
+            return
+        current_item = self.list_orders.currentItem()
+        if not current_item:
+            QtWidgets.QMessageBox.information(self, "알림", "실행할 고객 주문을 리스트에서 먼저 선택하세요.")
+            return
+
+        order = current_item.data(QtCore.Qt.UserRole)
+        self._set_robot_status("RUNNING", f"주문 실행 중 ({order['id']})", "#16a34a", "#15803d")
+        self.add_log(f"사용자 실행 승인 → [{order['id']}] 목표 침대 배치 시퀀스 시작")
+
+        for idx, c_type in enumerate(order["cubes"]):
+            stiff = 18.8 if c_type == "Hard" else (6.4 if c_type == "Soft" else 7.5)
+            height = 35.0 if c_type == "Soft High" else 25.0
+            self.bed_data[idx + 1] = {"type": c_type, "stiffness": stiff, "height": height}
+
+        self.spike_val = 16.4
+        self._refresh_matrix_ui()
+
+        self.orders = [o for o in self.orders if o["id"] != order["id"]]
+        self._refresh_order_list()
+
+    # ==========================================================================
+    # 상시 제어반 및 예외 알람 팝업
+    # ==========================================================================
+    def _set_robot_status(self, badge, desc, pill_color, text_color):
+        self.lbl_status_pill.setText(f"● {badge}")
+        self.lbl_status_pill.setStyleSheet(
+            f"background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 4px 12px; color: {pill_color}; font-weight: bold;"
+        )
+        self.lbl_robot_detail.setText(f"DOOSAN M0609  |  {desc}")
+        self.lbl_robot_detail.setStyleSheet(f"font-weight: bold; color: {text_color};")
+
+    def handle_start(self):
+        if self.is_locked:
+            self.trigger_exception("ERR-102", "알람 해제 후 시작할 수 있습니다.")
+            return
+        self._set_robot_status("RUNNING", "자동 운전 중 (RUNNING)", "#16a34a", "#15803d")
+        self.add_log("시스템 제어: 로봇 운전 시작 (START)")
+
+    def handle_stop(self):
+        if not self.is_locked:
+            self._set_robot_status("PAUSED", "일시 정지 (PAUSED)", "#eab308", "#b45309")
+            self.add_log("시스템 제어: 로봇 일시 정지 (STOP)")
+
+    def handle_request_probing(self):
+        if self.is_locked:
+            return
+        self._set_robot_status("PROBING", "촉각 강성·높이 스캔 중...", "#0284c7", "#0369a1")
+        self.add_log("요청: 침대(BED) 및 교체 트레이(TRAY) 초기 강성(N/mm)·높이 프로빙 실행")
+
+        bed_preset = [("Hard", 18.7, 25.0), ("Soft", 6.3, 24.8), ("Soft High", 7.4, 35.1),
+                      ("Hard", 19.1, 25.1), ("Soft", 6.1, 24.9), ("Hard", 18.5, 25.0)]
+        tray_preset = [("Soft High", 7.6, 35.0), ("Hard", 18.9, 25.0), ("Soft", 6.5, 24.7),
+                       ("Soft High", 7.3, 35.2), ("Hard", 18.6, 25.0), ("Soft", 6.2, 24.9)]
+
+        for i in range(1, 7):
+            self.bed_data[i] = {"type": bed_preset[i - 1][0], "stiffness": bed_preset[i - 1][1], "height": bed_preset[i - 1][2]}
+            self.tray_data[i] = {"type": tray_preset[i - 1][0], "stiffness": tray_preset[i - 1][1], "height": tray_preset[i - 1][2]}
+
+        self.spike_val = 19.1
+        self._refresh_matrix_ui()
+
+    def handle_reset(self):
+        self.is_locked = False
+        self.swap_selection = None
+        for i in range(1, 7):
+            self.bed_data[i] = {"type": "미측정", "stiffness": 0.0, "height": 0.0}
+            self.tray_data[i] = {"type": "미측정", "stiffness": 0.0, "height": 0.0}
+        self._refresh_matrix_ui()
+        self._set_robot_status("IDLE", "대기 중 (IDLE)", "#eab308", "#b45309")
+        self.add_log("시스템 및 매트릭스 데이터 전체 초기화 완료 (RESET)")
+
+    def handle_estop(self):
+        self.trigger_exception("E-STOP", "작업자 비상정지(E-STOP) 버튼이 눌렸습니다. 모든 서보 모션이 즉시 차단됩니다.")
+
+    def trigger_exception(self, err_code, description):
+        self.is_locked = True
+        self._set_robot_status("ALARM", "비상 정지 / 알람 잠금", "#dc2626", "#dc2626")
+        ts = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        self.add_log(f"🚨 [예외발생 {err_code}] {description}")
+
+        dlg = ExceptionAlarmDialog(err_code, description, ts, self)
+        dlg.exec_()
+        self.is_locked = False
+        self._set_robot_status("IDLE", "대기 중 (IDLE)", "#eab308", "#b45309")
+        self.add_log("알람 확인 및 인터록 복구 완료 (IDLE)")
+
+    def add_log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.text_log.append(f"[{ts}] {msg}")
+
+    def _on_tick(self):
+        self.sim_tick += 1
+        self.lbl_clock.setText(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
+
+        val = 1.1 + random.uniform(0.0, 0.5)
+        if self.spike_val > 0.5:
+            val = self.spike_val + random.uniform(-0.2, 0.2)
+            self.spike_val *= 0.86
+        self.force_graph.add_point(val)
+
+        t = self.sim_tick * 0.05
+        rx = 0.50 + math.cos(t) * 0.22
+        ry = 0.58 + math.sin(t * 1.3) * 0.16
+        self.pos_map.update_state((rx, ry))
+        self.lbl_tcp_coord.setText(f"TCP: ({int((rx - 0.5) * 400)}, {int((ry - 0.16) * 400)})")
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    win = Coop1MainHMI()
+    win.show()
+    sys.exit(app.exec_())
