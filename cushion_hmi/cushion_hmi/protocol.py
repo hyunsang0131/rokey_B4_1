@@ -31,7 +31,8 @@ TOPIC_LOG = '/cushion/log'
 TOPIC_ORDER_CONFIG = '/cushion/order_config'
 
 # HTML 선택값을 HMI에 표시할 때 사용할 강성값 [N/mm]
-STIFFNESS_K = {'부드러움': 6.2, '단단함': 12.0}
+STIFFNESS_K = {'부드러움': 7.0, '단단함': 12.0}
+HEIGHTS = ('NORMAL', 'HIGH')
 
 # 연결 판단: 이 시간 동안 status 가 안 오면 끊김으로 본다
 STATUS_TIMEOUT = 2.0
@@ -81,6 +82,34 @@ COLS = 2
 
 def module_ids():
     return list(range(1, ROWS * COLS + 1))
+
+
+def normalize_order_slots(slots):
+    """Validate order slots and normalize legacy stiffness-only values."""
+    expected = {f'Slot {index}' for index in range(1, ROWS * COLS + 1)}
+    if not isinstance(slots, dict) or set(slots) != expected:
+        raise ValueError('slots에는 Slot 1부터 Slot 6까지 필요합니다')
+
+    normalized = {}
+    for name in sorted(expected, key=lambda slot: int(slot.split()[-1])):
+        value = slots[name]
+        if isinstance(value, str):
+            stiffness = value
+            height = 'NORMAL'
+        elif isinstance(value, dict):
+            stiffness = value.get('stiffness')
+            height = value.get('height', 'NORMAL')
+        else:
+            raise ValueError(f'{name} 설정 형식이 올바르지 않습니다')
+
+        if not isinstance(stiffness, str) or stiffness not in STIFFNESS_K:
+            raise ValueError(f'{name} 강성 값이 올바르지 않습니다')
+        if not isinstance(height, str) or height not in HEIGHTS:
+            raise ValueError(f'{name} 높이 값이 올바르지 않습니다')
+        if stiffness == '단단함' and height != 'NORMAL':
+            raise ValueError(f'{name} 단단한 모듈은 기본 높이만 지원합니다')
+        normalized[name] = {'stiffness': stiffness, 'height': height}
+    return normalized
 
 
 def module_rc(mid):

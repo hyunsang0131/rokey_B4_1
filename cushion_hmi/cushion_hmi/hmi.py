@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QProgressBar, QSizePolicy
 )
 from cushion_hmi import protocol as P
+from cushion_hmi.desktop_launcher import ensure_desktop_launcher
 from cushion_hmi.order_server import create_order_server
 from cushion_hmi.ros_bridge import RosBridge
 
@@ -99,6 +100,7 @@ class TrayDiagram(QWidget):
     def __init__(self, types, names, title, parent=None):
         super().__init__(parent)
         self.types = types; self.names = names; self.title = title
+        self.heights = ['NORMAL'] * 6
         self.values = [None]*6
         self.setMinimumHeight(180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -124,22 +126,33 @@ class TrayDiagram(QWidget):
             x = x0 + col * (cw + gap)
             y = y0 + row * (ch + gap)
             slot_type = self.types[i]
-            color = ("#d9ebff" if slot_type == "S" else
-                     "#ffe0df" if slot_type == "H" else "#eef1f5")
+            height = self.heights[i]
+            is_soft = slot_type == "S"
+            color = (
+                "#DFD3C0" if is_soft and height == "HIGH" else
+                "#F4ECE0" if is_soft else
+                "#53687A" if slot_type == "H" else "#eef1f5")
             p.setBrush(QColor(color)); p.setPen(QPen(QColor("#98a9be"),1))
             p.drawRoundedRect(QRectF(x,y,cw,ch),5,5)
-            p.setPen(QColor("#17212e"))
+            p.setPen(QColor("#2C2620" if is_soft else "#FFFFFF"))
             p.setFont(QFont("Sans",10,QFont.Bold))
-            text = (f"{self.names[i]}\n{slot_type}" if slot_type in ("S", "H")
-                    else f"{self.names[i]}\n주문 대기")
+            text = (
+                f"{self.names[i]}\n{slot_type}\n"
+                f"{'높은 지지' if height == 'HIGH' else '기본 높이'}"
+                if slot_type in ("S", "H")
+                else f"{self.names[i]}\n주문 대기")
             if self.values[i] is not None: text+=f"\n({self.values[i]:.2f})"
             p.drawText(QRectF(x,y,cw,ch),Qt.AlignCenter,text)
         p.end()
 
     def set_order(self, slots):
         names = [f"Slot {index}" for index in range(1, 7)]
-        self.types = ["S" if slots[name] == "부드러움" else "H" for name in names]
-        self.values = [P.STIFFNESS_K[slots[name]] for name in names]
+        self.types = [
+            "S" if slots[name]["stiffness"] == "부드러움" else "H"
+            for name in names]
+        self.heights = [slots[name]["height"] for name in names]
+        self.values = [
+            P.STIFFNESS_K[slots[name]["stiffness"]] for name in names]
         self.update()
 
 
@@ -180,7 +193,8 @@ class MainWindow(QMainWindow):
         self.estopped=False
         self.stock={"S":24,"H":18}
         self.logs=[]
-        self.order = None
+        self.orders = []
+        self.selected_order_index = -1
         self.build()
         self.log("시스템","HMI UI 시연 모드 시작 — ROS 2 / 로봇 연결 없음")
 
@@ -275,10 +289,58 @@ class MainWindow(QMainWindow):
         lay.addWidget(label("고객 주문 사항",18,True))
 
         content = QHBoxLayout()
+        queue_panel = QWidget()
+        queue_layout = QVBoxLayout(queue_panel)
+        queue_layout.setContentsMargins(0, 0, 0, 0)
+        self.order_queue_count = label("접수 주문 0건", 13, True)
+        queue_layout.addWidget(self.order_queue_count)
+        self.order_queue = QTableWidget(0, 3)
+        self.order_queue.setHorizontalHeaderLabels(
+            ["순서", "주문 번호", "모델"])
+        self.order_queue.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch)
+        self.order_queue.verticalHeader().hide()
+        self.order_queue.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.order_queue.setSelectionBehavior(QTableWidget.SelectRows)
+        self.order_queue.setSelectionMode(QTableWidget.SingleSelection)
+        self.order_queue.currentCellChanged.connect(
+            self.on_order_selection_changed)
+        queue_layout.addWidget(self.order_queue, 1)
+
+        actions = QGridLayout()
+        self.delete_order_button = QPushButton("주문 삭제")
+        self.move_order_up_button = QPushButton("우선순위 위로")
+        self.move_order_down_button = QPushButton("우선순위 아래로")
+        self.execute_order_button = QPushButton("제작 실행")
+        self.delete_order_button.clicked.connect(self.delete_selected_order)
+        self.move_order_up_button.clicked.connect(
+            self.move_selected_order_up)
+        self.move_order_down_button.clicked.connect(
+            self.move_selected_order_down)
+        self.execute_order_button.clicked.connect(
+            self.execute_selected_order)
+        actions.addWidget(self.delete_order_button, 0, 0)
+        actions.addWidget(self.move_order_up_button, 0, 1)
+        actions.addWidget(self.move_order_down_button, 1, 0)
+        actions.addWidget(self.execute_order_button, 1, 1)
+        queue_layout.addLayout(actions)
+        content.addWidget(self.group("주문 대기열", queue_panel), 2)
+
+        selected_order_panel = QWidget()
+        selected_layout = QHBoxLayout(selected_order_panel)
+        selected_layout.setContentsMargins(0, 0, 0, 0)
+        diagram_panel = QWidget()
+        diagram_layout = QVBoxLayout(diagram_panel)
+        diagram_layout.setContentsMargins(0, 0, 0, 0)
         self.order_diagram = TrayDiagram(
             ["-"] * 6, SLOTS, "HTML 주문 작업 현황")
         self.order_diagram.values = [None] * 6
-        content.addWidget(self.group("주문 구성 이미지", self.order_diagram), 3)
+        diagram_layout.addWidget(
+            self.group("주문 구성 이미지", self.order_diagram), 1)
+        diagram_layout.addWidget(label(
+            "파란색: 딱딱함 · 밝은 베이지: 부드러움/기본 높이 · "
+            "진한 베이지: 부드러움/높은 지지", 10))
+        selected_layout.addWidget(diagram_panel, 3)
 
         details = QWidget()
         details_layout = QVBoxLayout(details)
@@ -298,17 +360,18 @@ class MainWindow(QMainWindow):
         self.order_summary.setWordWrap(True)
         details_layout.addWidget(self.group("슬롯 구성", self.order_summary), 2)
         details_layout.addStretch(1)
-        content.addWidget(details, 2)
+        selected_layout.addWidget(details, 2)
+        content.addWidget(
+            self.group("선택 주문 상세", selected_order_panel), 5)
         lay.addLayout(content, 1)
+        self.update_order_queue()
         return page
 
     def on_order_config(self, data):
-        slots = data.get("slots")
-        expected = {f"Slot {index}" for index in range(1, 7)}
-        if (not isinstance(slots, dict) or set(slots) != expected
-                or any(not isinstance(value, str) or value not in P.STIFFNESS_K
-                       for value in slots.values())):
-            self.log("주문 거부", "잘못된 HTML 주문 슬롯 데이터")
+        try:
+            slots = P.normalize_order_slots(data.get("slots"))
+        except ValueError as exc:
+            self.log("주문 거부", str(exc))
             return
 
         order_id = data.get("order_id")
@@ -316,16 +379,145 @@ class MainWindow(QMainWindow):
             self.log("주문 거부", "주문 번호가 없거나 올바르지 않습니다")
             return
 
-        self.order = {"order_id": order_id, "slots": dict(slots)}
-        address = random_shipping_address()
+        bed_model = data.get("bed_model", "모델 정보 없음")
+        size = data.get("size", "")
+        created_at = data.get("created_at")
+        if (not isinstance(bed_model, str) or len(bed_model) > 64
+                or not isinstance(size, str) or len(size) > 32):
+            self.log("주문 거부", "주문 모델 또는 규격 정보가 올바르지 않습니다")
+            return
+        if created_at is not None and (
+                not isinstance(created_at, str) or len(created_at) > 64):
+            self.log("주문 거부", "주문 접수 시간이 올바르지 않습니다")
+            return
+
+        order = {
+            "order_id": order_id,
+            "bed_model": bed_model,
+            "size": size,
+            "created_at": created_at or datetime.now().isoformat(
+                timespec="seconds"),
+            "slots": dict(slots),
+            "address": random_shipping_address(),
+        }
+        self.orders.append(order)
+        self.selected_order_index = len(self.orders) - 1
+        self.update_order_queue()
+        self.log(
+            "주문 수신",
+            f"HTML 주문 {order_id}을 대기열 {len(self.orders)}번에 추가")
+
+    def update_order_queue(self):
+        if not hasattr(self, "order_queue"):
+            return
+
+        self.order_queue.blockSignals(True)
+        self.order_queue.setRowCount(len(self.orders))
+        for index, order in enumerate(self.orders):
+            values = (
+                str(index + 1),
+                order["order_id"],
+                f'{order["bed_model"]} {order["size"]}'.strip(),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.order_queue.setItem(index, column, item)
+        self.order_queue_count.setText(f"접수 주문 {len(self.orders)}건")
+        if 0 <= self.selected_order_index < len(self.orders):
+            self.order_queue.setCurrentCell(self.selected_order_index, 0)
+        else:
+            self.selected_order_index = -1
+            self.order_queue.clearSelection()
+        self.order_queue.blockSignals(False)
+        self.show_selected_order()
+
+    def on_order_selection_changed(self, current_row, *_args):
+        self.selected_order_index = current_row
+        self.show_selected_order()
+
+    def show_selected_order(self):
+        index = self.selected_order_index
+        has_selection = 0 <= index < len(self.orders)
+        self.delete_order_button.setEnabled(has_selection)
+        self.execute_order_button.setEnabled(has_selection)
+        self.move_order_up_button.setEnabled(has_selection and index > 0)
+        self.move_order_down_button.setEnabled(
+            has_selection and index < len(self.orders) - 1)
+        if not has_selection:
+            self.order_diagram.types = ["-"] * 6
+            self.order_diagram.heights = ["NORMAL"] * 6
+            self.order_diagram.values = [None] * 6
+            self.order_diagram.update()
+            self.order_number.setText("주문 번호\n주문을 선택하세요")
+            self.order_address.setText("주문을 선택하면 배송 정보가 표시됩니다.")
+            self.order_summary.setText("선택한 주문의 슬롯 구성이 표시됩니다.")
+            return
+
+        order = self.orders[index]
+        slots = order["slots"]
         self.order_diagram.set_order(slots)
-        self.order_number.setText(f"주문 번호\n{order_id}")
-        self.order_address.setText(f"샘플 배송 주소\n{address}")
+        self.order_number.setText(
+            f'주문 번호\n{order["order_id"]}\n'
+            f'{order["bed_model"]} {order["size"]}'.strip())
+        self.order_address.setText(f'샘플 배송 주소\n{order["address"]}')
         self.order_summary.setText("\n".join(
-            f"M{index}: {slots[f'Slot {index}']} "
-            f"({P.STIFFNESS_K[slots[f'Slot {index}']]:g} N/mm)"
-            for index in range(1, 7)))
-        self.log("주문 수신", f"HTML 주문 {order_id}을 작업 현황 이미지에 반영")
+            f"M{slot}: {self.format_order_slot(slots[f'Slot {slot}'])}"
+            for slot in range(1, 7)))
+
+    @staticmethod
+    def format_order_slot(slot):
+        stiffness = slot["stiffness"]
+        height = "높은 지지" if slot["height"] == "HIGH" else "기본 높이"
+        return (
+            f"{stiffness} ({P.STIFFNESS_K[stiffness]:g} N/mm) · {height}")
+
+    def delete_selected_order(self):
+        index = self.selected_order_index
+        if not 0 <= index < len(self.orders):
+            return
+        order_id = self.orders[index]["order_id"]
+        del self.orders[index]
+        self.selected_order_index = min(index, len(self.orders) - 1)
+        self.update_order_queue()
+        self.log("주문 삭제", f"주문 {order_id}을 대기열에서 삭제")
+
+    def move_selected_order_up(self):
+        index = self.selected_order_index
+        if not 0 < index < len(self.orders):
+            return
+        self.orders[index - 1], self.orders[index] = (
+            self.orders[index], self.orders[index - 1])
+        self.selected_order_index = index - 1
+        self.update_order_queue()
+        self.log(
+            "우선순위 변경",
+            f"주문 {self.orders[index - 1]['order_id']}을 한 단계 올림")
+
+    def move_selected_order_down(self):
+        index = self.selected_order_index
+        if not 0 <= index < len(self.orders) - 1:
+            return
+        self.orders[index], self.orders[index + 1] = (
+            self.orders[index + 1], self.orders[index])
+        self.selected_order_index = index + 1
+        self.update_order_queue()
+        self.log(
+            "우선순위 변경",
+            f"주문 {self.orders[index + 1]['order_id']}을 한 단계 내림")
+
+    def execute_selected_order(self):
+        index = self.selected_order_index
+        if not 0 <= index < len(self.orders):
+            return
+        order_id = self.orders[index]["order_id"]
+        self.log("제작 실행", f"주문 {order_id} 제작 실행 버튼 선택 (ROS 미연동)")
+        QMessageBox.information(
+            self,
+            "제작 실행",
+            "이 버튼은 아직 화면 동작만 준비되어 있습니다.\n"
+            "ROS 2 제작 명령은 전송되지 않았습니다.",
+        )
 
     def update_tray_table(self):
         selected=self.tray_select.currentIndex()
@@ -390,6 +582,15 @@ def main(args=None):
     server_thread = None
     bridge_started = False
     try:
+        try:
+            launcher_path, created = ensure_desktop_launcher()
+        except (FileExistsError, FileNotFoundError, OSError) as exc:
+            bridge.node.get_logger().warning(
+                f'바탕화면 HMI 실행기 설치 실패: {exc}')
+        else:
+            action = '생성' if created else '이미 있음'
+            bridge.node.get_logger().info(
+                f'바탕화면 HMI 실행기 {action}: {launcher_path}')
         bridge.start()
         bridge_started = True
         win.show()

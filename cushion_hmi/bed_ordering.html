@@ -27,11 +27,11 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
 
-    // 보유 재고 한도 (딱딱함 6개, 부드러움 2개, 높은 지지 2개)
+    // 보유 재고 한도 (딱딱함 6개, 기본 높이 부드러움 2개, 높은 지지 부드러움 2개)
     const STOCK_LIMITS = {
       HARD: 6,
-      SOFT: 2,
-      HIGH: 2,
+      SOFT_NORMAL: 2,
+      SOFT_HIGH: 2,
     };
 
     // 침대 라인업 데이터
@@ -456,8 +456,44 @@
         modules.find((m) => m.cell_id === activeCellId) || modules[0];
 
       const hardCount = modules.filter((m) => m.hardness === '40A').length;
-      const softCount = modules.filter((m) => m.hardness === '10A').length;
-      const highCount = modules.filter((m) => m.height === 'HIGH').length;
+      const softNormalCount = modules.filter(
+        (m) => m.hardness === '10A' && m.height === 'NORMAL'
+      ).length;
+      const softHighCount = modules.filter(
+        (m) => m.hardness === '10A' && m.height === 'HIGH'
+      ).length;
+
+      const getStockAlert = (nextModules) => {
+        const nextHard = nextModules.filter(
+          (m) => m.hardness === '40A'
+        ).length;
+        const nextSoftNormal = nextModules.filter(
+          (m) => m.hardness === '10A' && m.height === 'NORMAL'
+        ).length;
+        const nextSoftHigh = nextModules.filter(
+          (m) => m.hardness === '10A' && m.height === 'HIGH'
+        ).length;
+
+        if (nextHard > STOCK_LIMITS.HARD) {
+          return '딱딱한 모듈 재고가 부족합니다.';
+        }
+        if (nextSoftNormal > STOCK_LIMITS.SOFT_NORMAL) {
+          return '기본 높이 부드러운 모듈은 최대 2개까지 사용할 수 있습니다.';
+        }
+        if (nextSoftHigh > STOCK_LIMITS.SOFT_HIGH) {
+          return '높은 지지 부드러운 모듈은 최대 2개까지 사용할 수 있습니다.';
+        }
+        return '';
+      };
+
+      const applyModulesIfInStock = (nextModules) => {
+        const alertMessage = getStockAlert(nextModules);
+        if (alertMessage) {
+          setStockAlertMessage(alertMessage);
+          return;
+        }
+        setModules(nextModules);
+      };
 
       const handleOpenCustomizer = (bed) => {
         setSelectedBed(bed);
@@ -475,15 +511,7 @@
           return { ...m, hardness: newHardness, height: adjustedHeight };
         });
 
-        const nextHard = nextModules.filter((m) => m.hardness === '40A').length;
-        const nextSoft = nextModules.filter((m) => m.hardness === '10A').length;
-
-        if (nextHard > STOCK_LIMITS.HARD || nextSoft > STOCK_LIMITS.SOFT) {
-          setStockAlertMessage('재고가 부족합니다 다른 매트릭스를 선택해주세요');
-          return;
-        }
-
-        setModules(nextModules);
+        applyModulesIfInStock(nextModules);
       };
 
       const handleHeightChange = (newHeight) => {
@@ -494,44 +522,42 @@
           m.cell_id === activeCellId ? { ...m, height: newHeight } : m
         );
 
-        const nextHigh = nextModules.filter((m) => m.height === 'HIGH').length;
-        if (nextHigh > STOCK_LIMITS.HIGH) {
-          setStockAlertMessage('재고가 부족합니다 다른 매트릭스를 선택해주세요');
-          return;
-        }
-
-        setModules(nextModules);
+        applyModulesIfInStock(nextModules);
       };
 
       const applyQuickPreset = (presetType) => {
+        let nextModules = modules;
         if (presetType === 'ALL_HARD') {
-          setModules(
-            modules.map((m) => ({ ...m, hardness: '40A', height: 'NORMAL' }))
-          );
+          nextModules = modules.map((m) => ({
+            ...m,
+            hardness: '40A',
+            height: 'NORMAL',
+          }));
         } else if (presetType === 'SHOULDER_SOFT') {
-          setModules(
-            modules.map((m) => ({
-              ...m,
-              hardness: m.cell_id === 1 || m.cell_id === 2 ? '10A' : '40A',
-              height: m.cell_id === 1 || m.cell_id === 2 ? 'HIGH' : 'NORMAL',
-            }))
-          );
+          nextModules = modules.map((m) => ({
+            ...m,
+            hardness: m.cell_id === 1 || m.cell_id === 2 ? '10A' : '40A',
+            height: m.cell_id === 1 || m.cell_id === 2 ? 'HIGH' : 'NORMAL',
+          }));
         } else if (presetType === 'LUMBAR_SOFT') {
-          setModules(
-            modules.map((m) => ({
-              ...m,
-              hardness: m.cell_id === 3 || m.cell_id === 4 ? '10A' : '40A',
-              height: m.cell_id === 3 || m.cell_id === 4 ? 'HIGH' : 'NORMAL',
-            }))
-          );
+          nextModules = modules.map((m) => ({
+            ...m,
+            hardness: m.cell_id === 3 || m.cell_id === 4 ? '10A' : '40A',
+            height: m.cell_id === 3 || m.cell_id === 4 ? 'HIGH' : 'NORMAL',
+          }));
         }
+        applyModulesIfInStock(nextModules);
       };
 
       const sendOrderToHmi = async (order) => {
         const slots = Object.fromEntries(
           order.modules.map((module) => [
             `Slot ${module.cell_id}`,
-            module.hardness_code === '10A' ? '부드러움' : '단단함',
+            {
+              stiffness:
+                module.hardness_code === '10A' ? '부드러움' : '단단함',
+              height: module.height,
+            },
           ])
         );
 
@@ -548,6 +574,8 @@
             body: JSON.stringify({
               order_id: order.order_id,
               created_at: order.timestamp,
+              bed_model: order.bed_model,
+              size: order.size,
               slots,
             }),
           });
@@ -1129,7 +1157,7 @@
                       compact={true}
                     />
 
-                    <div className="mt-4 pt-4 border-t border-[#E2E0D8] grid grid-cols-3 gap-2 text-center text-[12px]">
+                    <div className="mt-4 pt-4 border-t border-[#E2E0D8] grid grid-cols-2 gap-2 text-center text-[12px]">
                       <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
                         <span className="text-[#767676] block text-[11px]">
                           딱딱함 (약 12N/mm)
@@ -1140,18 +1168,18 @@
                       </div>
                       <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
                         <span className="text-[#767676] block text-[11px]">
-                          부드러움 (약 7N/mm)
+                          부드러움 · 기본 높이
                         </span>
                         <strong className="text-[#1A1A1A]">
-                          {softCount} / {STOCK_LIMITS.SOFT}개 사용
+                          {softNormalCount} / {STOCK_LIMITS.SOFT_NORMAL}개 사용
                         </strong>
                       </div>
                       <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
                         <span className="text-[#767676] block text-[11px]">
-                          높은 지지
+                          부드러움 · 높은 지지
                         </span>
                         <strong className="text-[#1A1A1A]">
-                          {highCount} / {STOCK_LIMITS.HIGH}개 사용
+                          {softHighCount} / {STOCK_LIMITS.SOFT_HIGH}개 사용
                         </strong>
                       </div>
                     </div>
@@ -1338,7 +1366,8 @@
                   {stockAlertMessage}
                 </h3>
                 <p className="text-[13px] text-[#666666] mt-2.5 leading-relaxed break-keep">
-                  현재 보유 수량은 딱딱함(약 12N/mm) 최대 6개, 부드러움(약 7N/mm) 최대 2개, 높은 지지 최대 2개입니다.
+                  현재 보유 수량은 딱딱함 최대 6개, 기본 높이 부드러움 최대 2개,
+                  높은 지지 부드러움 최대 2개입니다.
                 </p>
                 <button
                   onClick={() => setStockAlertMessage('')}
