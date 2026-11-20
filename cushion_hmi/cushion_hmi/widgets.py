@@ -108,6 +108,75 @@ class ModuleGrid(QWidget):
             cell.set_data(by_id.get(mid, {}), mid == current)
 
 
+class OrderPreview(QWidget):
+    """Render the six browser-selected mattress slots as a tray image."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(360, 390)
+        self.slots = None
+
+    def set_slots(self, slots):
+        self.slots = dict(slots) if slots else None
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor('#f8fafc'))
+
+        tray = QRectF(24, 42, self.width() - 48, self.height() - 84)
+        painter.setPen(QPen(QColor('#243243'), 8))
+        painter.setBrush(QColor('#dce2e9'))
+        painter.drawRoundedRect(tray, 18, 18)
+
+        painter.setPen(QColor('#17212f'))
+        painter.setFont(QFont(self.font().family(), 13, QFont.Bold))
+        painter.drawText(QRectF(24, 10, self.width() - 48, 24),
+                         Qt.AlignCenter, '주문 트레이 · 슬롯 구성')
+
+        if self.slots is None:
+            painter.setPen(QColor('#6b7280'))
+            painter.setFont(QFont(self.font().family(), 12))
+            painter.drawText(tray, Qt.AlignCenter, '고객 주문을 기다리는 중')
+            return
+
+        gap = 10
+        inset = 18
+        cell_width = (tray.width() - inset * 2 - gap) / 2
+        cell_height = (tray.height() - inset * 2 - gap * 2) / 3
+        for index in range(6):
+            row, col = divmod(index, 2)
+            cell = QRectF(
+                tray.left() + inset + col * (cell_width + gap),
+                tray.top() + inset + row * (cell_height + gap),
+                cell_width, cell_height)
+            name = f'Slot {index + 1}'
+            value = self.slots[name]
+            soft = value == '부드러움'
+            fill = '#dbeafe' if soft else '#fee2e2'
+            border = '#3b82f6' if soft else '#ef4444'
+            painter.setPen(QPen(QColor(border), 2))
+            painter.setBrush(QColor(fill))
+            painter.drawRoundedRect(cell, 10, 10)
+
+            painter.setPen(QColor('#17212f'))
+            painter.setFont(QFont(self.font().family(), 12, QFont.Bold))
+            painter.drawText(QRectF(cell.left(), cell.top() + 8,
+                                    cell.width(), 22), Qt.AlignCenter,
+                             f'M{index + 1}  ·  {value}')
+            painter.setFont(QFont(self.font().family(), 11))
+            painter.drawText(QRectF(cell.left(), cell.top() + 31,
+                                    cell.width(), 22), Qt.AlignCenter,
+                             f'k  {P.STIFFNESS_K[value]:g} N/mm')
+
+        painter.setFont(QFont(self.font().family(), 10))
+        painter.setPen(QColor('#374151'))
+        painter.drawText(QRectF(24, self.height() - 30,
+                                self.width() - 48, 20), Qt.AlignCenter,
+                         '파랑: 부드러움 (Soft)     빨강: 단단함 (Hard)')
+
+
 class StateBar(QWidget):
     """플로우차트 단계를 한 줄로 보여주고 현재 단계를 강조한다."""
 
