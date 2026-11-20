@@ -14,6 +14,7 @@
 - Ubuntu 24.04, ROS 2 Jazzy
 - Doosan ROS 2 드라이버 [`doosan-robot2`](https://github.com/DoosanRobotics/doosan-robot2) (`dsr_msgs2`, `dsr_common2`)
 - RG2 브링업 패키지 `m0609_rg2_bringup` (강의 제공)
+- `dsr_tactile_probing_sim.py`의 2D 상단 이미지 생성에는 Matplotlib이 필요합니다: `sudo apt install python3-matplotlib`
 
 ## 설치
 

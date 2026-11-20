@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 import time
+from pathlib import Path
+
 import numpy as np
 
 import rclpy
@@ -51,8 +53,8 @@ class DsrRg2MultiProbingNode(Node):
         self.base_frame = 'base_link'
         self.ee_frame = 'rg2_tcp'
         self.gripper_length_mm = 150.0
-        # 목표 물체 규격: 가로(짧은 변) 41mm (4.1cm), 세로(긴 변) 61mm (6.1cm), 높이 20mm
-        self.matrix_size = [0.041, 0.061, 0.020]
+        # 목표 물체 규격: 가로(짧은 변) 41mm, 세로(긴 변) 64mm, 높이 20mm
+        self.matrix_size = [0.064, 0.041, 0.020]
 
         # 사전에 입력받은 대략적인 물체 중심 좌표 (m -> mm 변환)
         zone_centers_m = [(0.34481, 0.0)]
@@ -350,6 +352,75 @@ class DsrRg2MultiProbingNode(Node):
         self.marker_pub.publish(marker_array)
 
 
+def save_top_view_plot(contacts, center_xy_mm, length_mm, width_mm, long_axis_yaw_deg, output_path):
+    try:
+        import matplotlib
+    except ImportError as exc:
+        raise RuntimeError(
+            "Top-view plotting requires Matplotlib; on Ubuntu install it with "
+            "`sudo apt install python3-matplotlib`."
+        ) from exc
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+
+    center = np.asarray(center_xy_mm, dtype=float)
+    angle_rad = math.radians(long_axis_yaw_deg)
+    long_axis = np.array([math.cos(angle_rad), math.sin(angle_rad)])
+    short_axis = np.array([-math.sin(angle_rad), math.cos(angle_rad)])
+    half_length = length_mm / 2.0
+    half_width = width_mm / 2.0
+    corners = np.array([
+        center - long_axis * half_length - short_axis * half_width,
+        center + long_axis * half_length - short_axis * half_width,
+        center + long_axis * half_length + short_axis * half_width,
+        center - long_axis * half_length + short_axis * half_width,
+    ])
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.add_patch(Polygon(corners, closed=True, facecolor="cornflowerblue", alpha=0.25,
+                         edgecolor="navy", linewidth=2, label="Estimated cube"))
+    ax.scatter(center[0], center[1], marker="x", s=90, color="navy", label="Estimated center")
+
+    plotted_contacts = []
+    for index, contact in enumerate(contacts, start=1):
+        point = np.asarray(contact["xy"], dtype=float)
+        if point.size < 2:
+            continue
+        point = point[:2]
+        plotted_contacts.append(point)
+        ax.scatter(point[0], point[1], s=45, zorder=3)
+        ax.annotate(
+            f"{index}: {contact['label']}\n({point[0]:.1f}, {point[1]:.1f})",
+            (point[0], point[1]),
+            xytext=(5, 6),
+            textcoords="offset points",
+            fontsize=8,
+        )
+
+    bounds = np.vstack([corners, np.asarray(plotted_contacts)]) if plotted_contacts else corners
+    padding = max(length_mm, width_mm) * 0.55
+    ax.set_xlim(float(bounds[:, 0].min() - padding), float(bounds[:, 0].max() + padding))
+    ax.set_ylim(float(bounds[:, 1].min() - padding), float(bounds[:, 1].max() + padding))
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("Base X (mm)")
+    ax.set_ylabel("Base Y (mm)")
+    ax.set_title(
+        f"Estimated top view: {length_mm:.0f} x {width_mm:.0f} mm, "
+        f"long-axis yaw {long_axis_yaw_deg:.1f} deg"
+    )
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="best")
+
+    try:
+        fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+
+    return output_path
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = DsrRg2MultiProbingNode()
@@ -604,6 +675,7 @@ def main(args=None):
                 length_span_mm = span_local_y_mm
                 width_center_xy = mid_x_vec
                 length_center_xy = mid_y_vec
+                long_axis_yaw_deg = normalize_deg(est_yaw_deg + 90.0)
                 grasp_yaw_deg = normalize_deg(-est_yaw_deg+ 90.0)
             else:
                 width_axis_name = "로컬 Y축"
@@ -616,6 +688,7 @@ def main(args=None):
                 length_span_mm = span_local_x_mm
                 width_center_xy = mid_y_vec
                 length_center_xy = mid_x_vec
+                long_axis_yaw_deg = normalize_deg(est_yaw_deg)
                 grasp_yaw_deg = normalize_deg(-est_yaw_deg)
 
             # 4단계: 상단 Z축 터치 (그리퍼 닫힌 상태 유지)
@@ -637,11 +710,22 @@ def main(args=None):
             node.remembered_object_pose = remembered_pose
 
             obj["est_center"] = np.array([final_center[0]/1000.0, final_center[1]/1000.0, est_top_z_mm/2000.0])
-            obj["est_yaw"] = est_yaw_rad
+            obj["est_yaw"] = math.radians(long_axis_yaw_deg)
             node.publish_visuals()
 
+            plot_path = Path.cwd() / f"tactile_top_view_object_{obj['id']}.png"
+            save_top_view_plot(
+                obj["remembered_contacts"],
+                final_center,
+                length_mm=node.matrix_size[0] * 1000.0,
+                width_mm=node.matrix_size[1] * 1000.0,
+                long_axis_yaw_deg=long_axis_yaw_deg,
+                output_path=plot_path,
+            )
+            node.get_logger().info(f"[상단 자세 추정 이미지 저장] {plot_path}")
+
             node.get_logger().info("==================================================")
-            node.get_logger().info("[가로(41mm) / 세로(61mm) 위치 및 접촉 힘 추정 결과]")
+            node.get_logger().info("[가로(41mm) / 세로(64mm) 위치 및 접촉 힘 추정 결과]")
             node.get_logger().info(
                 f"  1) 가로면 (짧은 변, 41mm 기준) -> [{width_axis_name}] 판별\n"
                 f"     - 가로 양 끝 접촉 좌표: ({width_p1[0]:.2f}, {width_p1[1]:.2f}) mm  <-->  ({width_p2[0]:.2f}, {width_p2[1]:.2f}) mm\n"
@@ -649,7 +733,7 @@ def main(args=None):
                 f"     - 가로 축 중앙 좌표   : ({width_center_xy[0]:.2f}, {width_center_xy[1]:.2f}) mm"
             )
             node.get_logger().info(
-                f"  2) 세로면 (긴 변, 61mm 기준)   -> [{length_axis_name}] 판별\n"
+                f"  2) 세로면 (긴 변, 64mm 기준)   -> [{length_axis_name}] 판별\n"
                 f"     - 세로 양 끝 접촉 좌표: ({length_p1[0]:.2f}, {length_p1[1]:.2f}) mm  <-->  ({length_p2[0]:.2f}, {length_p2[1]:.2f}) mm\n"
                 f"     - 세로 양 면 측정 힘  : {length_f1['force_mag']:.2f} N / {length_f2['force_mag']:.2f} N (접촉 간격: {length_span_mm:.1f} mm)\n"
                 f"     - 세로 축 중앙 좌표   : ({length_center_xy[0]:.2f}, {length_center_xy[1]:.2f}) mm"
