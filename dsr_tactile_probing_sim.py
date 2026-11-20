@@ -421,6 +421,44 @@ def save_top_view_plot(contacts, center_xy_mm, length_mm, width_mm, long_axis_ya
     return output_path
 
 
+def save_force_time_plot(sample_times, force_samples, contact_force_samples,
+                         threshold, label, sequence, contact_detected, output_dir):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_label = "".join(
+        character if character.isascii() and character.isalnum() else "_"
+        for character in label
+    ).strip("_") or "probe"
+    output_path = output_dir / f"force_{sequence:03d}_{time.time_ns()}_{safe_label}.png"
+
+    forces = np.asarray(force_samples, dtype=float).reshape((-1, 3))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    if sample_times:
+        ax.plot(sample_times, forces[:, 0], label="Fx (baseline corrected)")
+        ax.plot(sample_times, forces[:, 1], label="Fy (baseline corrected)")
+        ax.plot(sample_times, forces[:, 2], label="Fz (baseline corrected)")
+        ax.plot(sample_times, contact_force_samples, linewidth=2, label="Contact-direction force")
+        ax.axhline(threshold, color="red", linestyle="--", label=f"Threshold ({threshold:.1f} N)")
+        if contact_detected:
+            ax.axvline(sample_times[-1], color="black", linestyle=":", label="Contact stop")
+    ax.set_xlabel("Time from probe start (s)")
+    ax.set_ylabel("Force (N)")
+    ax.set_title(f"Probe force over time: {label} ({'contact' if contact_detected else 'no contact'})")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="best")
+
+    try:
+        fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+
+    return output_path
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = DsrRg2MultiProbingNode()
@@ -434,8 +472,26 @@ def main(args=None):
     tcp_probe_z_mm = (node.matrix_size[2] / 2.0) * 1000.0 + probe_z_boost_mm
     flange_probe_z_mm = tcp_probe_z_mm + node.gripper_length_mm + z_offset_mm
     safe_z_mm = flange_probe_z_mm + 45.0
+    probe_plot_index = 0
+    force_plot_dir = Path.cwd() / "tactile_force_logs"
 
-    def probe_direction(start_mm, dir_vec, face_label="", max_dist_mm=150.0, probe_vel=15.0, is_fine=False):
+    def save_probe_plot(label, sample_times, force_samples, contact_force_samples,
+                        threshold, contact_detected):
+        nonlocal probe_plot_index
+        probe_plot_index += 1
+        plot_path = save_force_time_plot(
+            sample_times,
+            force_samples,
+            contact_force_samples,
+            threshold,
+            label,
+            probe_plot_index,
+            contact_detected,
+            force_plot_dir,
+        )
+        node.get_logger().info(f"[힘-시간 그래프 저장] {plot_path}")
+
+    def probe_direction(start_mm, dir_vec, face_label="", max_dist_mm=150.0, probe_vel=3.0, is_fine=False):
         start_xy = np.array(start_mm, dtype=float)
         d_xy = np.array(dir_vec, dtype=float)
         d_xy /= np.linalg.norm(d_xy)
@@ -464,13 +520,16 @@ def main(args=None):
         node.calibrate_force_baseline()
 
         # 2. 대각선 아래 방향(target_xyz)으로 직선 이동 시작
-        node.send_movel([target_xy[0], target_xy[1], target_flange_z] + base_ori, vel=probe_vel, acc=20, sync_type=1)
+        node.send_movel([target_xy[0], target_xy[1], target_flange_z] + base_ori, vel=probe_vel, acc=5, sync_type=1)
 
         start_tcp_z_m = (start_flange_z - node.gripper_length_mm - z_offset_mm) / 1000.0
         path_m = [[start_xy[0]/1000.0, start_xy[1]/1000.0, start_tcp_z_m]]
         timeout_sec = (np.linalg.norm(target_xyz - start_xyz) / probe_vel) + 3.0
         t_start = time.time()
         consecutive_hits = 0
+        sample_times = []
+        force_samples = []
+        contact_force_samples = []
 
         while rclpy.ok() and (time.time() - t_start < timeout_sec):
             curr_tcp = node.get_current_tcp_pos()
@@ -480,6 +539,9 @@ def main(args=None):
 
             # [방법 A 핵심] XY 수평력 + Z축 수직 반발력을 모두 합산한 3D 대항력 계산
             opposing_force = float(-np.dot(diff_force[:3], d_3d))
+            sample_times.append(time.time() - t_start)
+            force_samples.append(diff_force.copy())
+            contact_force_samples.append(opposing_force)
 
             path_m.append([curr_tcp[0]/1000.0, curr_tcp[1]/1000.0, curr_tcp_z_mm/1000.0])
 
@@ -519,6 +581,14 @@ def main(args=None):
                 else:
                     node.coarse_paths.append(path_m)
                 node.publish_visuals()
+                save_probe_plot(
+                    face_label,
+                    sample_times,
+                    force_samples,
+                    contact_force_samples,
+                    node.force_threshold_xy,
+                    contact_detected=True,
+                )
 
                 # 후퇴 시 대각선 진입 방향의 정반대(뒤쪽+위쪽)로 빠져나와 물체를 끌지 않도록 함
                 retract_xyz = stopped_tcp[:3] - d_3d * 15.0
@@ -532,9 +602,17 @@ def main(args=None):
             time.sleep(0.02)
 
         node.send_movel([target_xy[0], target_xy[1], safe_z_mm] + base_ori, vel=100, acc=100, sync_type=0)
+        save_probe_plot(
+            face_label,
+            sample_times,
+            force_samples,
+            contact_force_samples,
+            node.force_threshold_xy,
+            contact_detected=False,
+        )
         return None, None
 
-    def probe_top_z(xy_mm, ori_deg, start_tcp_z_mm=45.0, min_tcp_z_mm=10.0, probe_vel=10.0):
+    def probe_top_z(xy_mm, ori_deg, start_tcp_z_mm=45.0, min_tcp_z_mm=10.0, probe_vel=3.0):
         start_flange_z = float(start_tcp_z_mm) + node.gripper_length_mm + z_offset_mm
         min_flange_z = float(min_tcp_z_mm) + node.gripper_length_mm + z_offset_mm
 
@@ -542,12 +620,15 @@ def main(args=None):
         time.sleep(0.2)
         node.calibrate_force_baseline()
 
-        node.send_movel([xy_mm[0], xy_mm[1], min_flange_z] + ori_deg, vel=probe_vel, acc=20, sync_type=1)
+        node.send_movel([xy_mm[0], xy_mm[1], min_flange_z] + ori_deg, vel=probe_vel, acc=5, sync_type=1)
 
         path_m = [[xy_mm[0]/1000.0, xy_mm[1]/1000.0, start_tcp_z_mm/1000.0]]
         timeout_sec = (abs(start_tcp_z_mm - min_tcp_z_mm) / probe_vel) + 3.0
         t_start = time.time()
         consecutive_hits = 0
+        sample_times = []
+        force_samples = []
+        contact_force_samples = []
 
         while rclpy.ok() and (time.time() - t_start < timeout_sec):
             curr_tcp = node.get_current_tcp_pos()
@@ -555,6 +636,9 @@ def main(args=None):
             curr_wrench = node.get_current_wrench()
             diff_force = curr_wrench[:3] - node.baseline_wrench[:3]
             upward_force_z = float(max(0.0, diff_force[2]))
+            sample_times.append(time.time() - t_start)
+            force_samples.append(diff_force.copy())
+            contact_force_samples.append(upward_force_z)
 
             path_m.append([xy_mm[0]/1000.0, xy_mm[1]/1000.0, curr_tcp_z/1000.0])
 
@@ -589,6 +673,14 @@ def main(args=None):
                 node.publish_visuals()
 
                 node.send_movel([xy_mm[0], xy_mm[1], safe_z_mm] + ori_deg, vel=90, acc=90, sync_type=0)
+                save_probe_plot(
+                    "상단 Z면",
+                    sample_times,
+                    force_samples,
+                    contact_force_samples,
+                    node.force_threshold_z,
+                    contact_detected=True,
+                )
                 return measured_tcp_z
 
             if abs(curr_tcp[2] - min_flange_z) < 1.0:
@@ -597,6 +689,14 @@ def main(args=None):
             time.sleep(0.02)
 
         node.send_movel([xy_mm[0], xy_mm[1], safe_z_mm] + ori_deg, vel=90, acc=90, sync_type=0)
+        save_probe_plot(
+            "상단 Z면",
+            sample_times,
+            force_samples,
+            contact_force_samples,
+            node.force_threshold_z,
+            contact_detected=False,
+        )
         return None
 
     try:
@@ -622,10 +722,10 @@ def main(args=None):
 
             # 1단계: 입력된 대략적 중심(zx, zy) 주변 4방향 탐색
             search_radius = 85.0
-            p_south, _ = probe_direction([zx - search_radius, zy], [+1,  0], face_label="1단계 -X면", max_dist_mm=150.0, probe_vel=8.0)
-            p_north, _ = probe_direction([zx + search_radius, zy], [-1,  0], face_label="1단계 +X면", max_dist_mm=150.0, probe_vel=8.0)
-            p_east,  _ = probe_direction([zx, zy - search_radius], [ 0, +1], face_label="1단계 -Y면", max_dist_mm=150.0, probe_vel=8.0)
-            p_west,  _ = probe_direction([zx, zy + search_radius], [ 0, -1], face_label="1단계 +Y면", max_dist_mm=150.0, probe_vel=8.0)
+            p_south, _ = probe_direction([zx - search_radius, zy], [+1,  0], face_label="1단계 -X면", max_dist_mm=150.0)
+            p_north, _ = probe_direction([zx + search_radius, zy], [-1,  0], face_label="1단계 +X면", max_dist_mm=150.0)
+            p_east,  _ = probe_direction([zx, zy - search_radius], [ 0, +1], face_label="1단계 -Y면", max_dist_mm=150.0)
+            p_west,  _ = probe_direction([zx, zy + search_radius], [ 0, -1], face_label="1단계 +Y면", max_dist_mm=150.0)
 
             if any(p is None for p in [p_south, p_north, p_east, p_west]):
                 node.get_logger().error(f"1단계 탐색 실패! ({node.force_threshold_xy}N 이상 접촉 미감지)")
@@ -636,8 +736,8 @@ def main(args=None):
 
             # 2단계: 비틀림각(Yaw) 추정
             offset_mm = 10.0
-            p_s1, _ = probe_direction([rough_cx - 60.0, rough_cy - offset_mm], [+1, 0], face_label="2단계 각도점1", max_dist_mm=100.0, probe_vel=8.0)
-            p_s2, _ = probe_direction([rough_cx - 60.0, rough_cy + offset_mm], [+1, 0], face_label="2단계 각도점2", max_dist_mm=100.0, probe_vel=8.0)
+            p_s1, _ = probe_direction([rough_cx - 60.0, rough_cy - offset_mm], [+1, 0], face_label="2단계 각도점1", max_dist_mm=100.0)
+            p_s2, _ = probe_direction([rough_cx - 60.0, rough_cy + offset_mm], [+1, 0], face_label="2단계 각도점2", max_dist_mm=100.0)
 
             est_yaw_rad = math.atan2(-(p_s2[0] - p_s1[0]), (p_s2[1] - p_s1[1])) if (p_s1 is not None and p_s2 is not None) else 0.0
             est_yaw_deg = math.degrees(est_yaw_rad)
@@ -648,10 +748,10 @@ def main(args=None):
             rough_center = np.array([rough_cx, rough_cy])
             standoff = 60.0
 
-            p_lx_neg, f_lx_neg = probe_direction(rough_center - u_x * standoff, +u_x, face_label="로컬X축 -면", max_dist_mm=100.0, probe_vel=8.0, is_fine=True)
-            p_lx_pos, f_lx_pos = probe_direction(rough_center + u_x * standoff, -u_x, face_label="로컬X축 +면", max_dist_mm=100.0, probe_vel=8.0, is_fine=True)
-            p_ly_neg, f_ly_neg = probe_direction(rough_center - u_y * standoff, +u_y, face_label="로컬Y축 -면", max_dist_mm=100.0, probe_vel=8.0, is_fine=True)
-            p_ly_pos, f_ly_pos = probe_direction(rough_center + u_y * standoff, -u_y, face_label="로컬Y축 +면", max_dist_mm=100.0, probe_vel=8.0, is_fine=True)
+            p_lx_neg, f_lx_neg = probe_direction(rough_center - u_x * standoff, +u_x, face_label="로컬X축 -면", max_dist_mm=100.0, is_fine=True)
+            p_lx_pos, f_lx_pos = probe_direction(rough_center + u_x * standoff, -u_x, face_label="로컬X축 +면", max_dist_mm=100.0, is_fine=True)
+            p_ly_neg, f_ly_neg = probe_direction(rough_center - u_y * standoff, +u_y, face_label="로컬Y축 -면", max_dist_mm=100.0, is_fine=True)
+            p_ly_pos, f_ly_pos = probe_direction(rough_center + u_y * standoff, -u_y, face_label="로컬Y축 +면", max_dist_mm=100.0, is_fine=True)
 
             if any(p is None for p in [p_lx_neg, p_lx_pos, p_ly_neg, p_ly_pos]):
                 node.get_logger().error("3단계 정밀 탐색 실패!")
@@ -693,7 +793,7 @@ def main(args=None):
 
             # 4단계: 상단 Z축 터치 (그리퍼 닫힌 상태 유지)
             grasp_ori = [0.0, 180.0, grasp_yaw_deg]
-            est_top_z_mm = probe_top_z(final_center, grasp_ori, start_tcp_z_mm=45.0, min_tcp_z_mm=2.0, probe_vel=12.0)
+            est_top_z_mm = probe_top_z(final_center, grasp_ori, start_tcp_z_mm=45.0, min_tcp_z_mm=2.0)
             if est_top_z_mm is None:
                 node.get_logger().warn(f"상단 Z축 {node.force_threshold_z}N 접촉 미감지 -> 기본 상단 높이(20.0mm) 사용")
                 est_top_z_mm = node.matrix_size[2] * 1000.0
