@@ -6,14 +6,18 @@
 # 화면은 /bed/cmd 로 명령을 보내고 /bed/status 로 받은 내용을 그대로 그린다.
 # 그래서 화면을 껐다 켜도 공정에는 영향이 없고, 마지막 상태가 다시 표시된다.
 #
-# 색은 상태를 뜻한다: 초록 = 정상, 노랑 = 주의, 빨강 = 불량.
+# 색은 상태를 뜻한다: 초록 = 정상, 노랑 = 주의, 빨강 = 불량, 보라 = 빈칸, 주황 = 맞지 않는 모듈(자동 보수).
 # 색만으로 구분하지 않도록 칸마다 기호와 글자(✓ 정상 / ! 주의 / ✕ 불량)를 같이 쓴다.
 
 import json
 import sys
 
+from bed_inspect import bed_config as cfg
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt
+
+from bed_inspect.bed_config import STEP_NAMES, STEP_REMEASURE
 
 # ── 색 ────────────────────────────────────────────────────────────────
 SURFACE = '#fcfcfb'
@@ -27,7 +31,10 @@ GRADE = {       # 등급: (배경, 글자색, 기호 + 이름)
     'warn': ('#fab219', '#0b0b0b', '! 주의'),
     'fail': ('#d03b3b', '#ffffff', '✕ 불량'),
     'nodata': ('#8a8983', '#ffffff', '? 측정 실패'),
+    'empty': ('#7a4fd0', '#ffffff', '○ 빈칸'),
+    'mismatch': ('#e0701f', '#ffffff', '≠ 맞지 않음'),
 }
+CLS_NAMES = {'soft': '부드러움', 'hard': '단단함', 'tall': '높음'}
 STATE = {       # 공정 상태: (이름, 배경, 글자색)
     'starting': ('시작 중', EMPTY, INK), 'idle': ('대기', EMPTY, INK),
     'running': ('실행 중', '#2a78d6', '#ffffff'), 'confirm': ('확인 대기', '#fab219', INK),
@@ -52,6 +59,17 @@ QPlainTextEdit, QListWidget {{ background: {PANEL}; border: 1px solid {LINE}; bo
 QComboBox, QDoubleSpinBox {{ background: {PANEL}; border: 1px solid #c3c2b7; border-radius: 4px; padding: 3px 6px; }}
 QLabel#hint {{ color: {INK2}; font-size: 12px; }}
 '''
+
+
+RACK_PER_ROW = 3                # 재고 수정 창에서 보관대를 한 줄에 몇 자리씩 (트레이 1개 = 3자리)
+
+
+def grid_pos(slot, cols):
+    """칸 번호(1부터) → 화면 위치 (줄, 칸). bed_config.DISPLAY_GRID 를 따르고, 없으면 번호 순서대로."""
+    for r, line in enumerate(cfg.DISPLAY_GRID):
+        if slot in line:
+            return r, line.index(slot)
+    return (slot - 1) // cols, (slot - 1) % cols
 
 
 def fmt(v, spec, dash='-'):
@@ -110,10 +128,22 @@ class Cell(QtWidgets.QFrame):
             return
         self.line1.setText(f'강성 {fmt(b.get("k"), ".2f")} N/mm')
         dev = b.get('dev')
-        self.line2.setText(b.get('note') or ('' if dev is None else f'기준 대비 {dev * 100:+.1f}%'))
-        src = {'calib': '저장한 기준값', 'median': '이번 측정의 중앙값'}.get(b.get('ref_src'), '-')
+        what = {'others': '주변 대비', 'profile': '목표 대비'}.get(b.get('ref_src'), '기준 대비')
+        if b.get('want') and b.get('cls'):
+            text = f'{CLS_NAMES[b["cls"]]} · 목표 {cfg.PROFILE_NAMES[b["want"]]}'
+        elif b.get('tall'):
+            text = '높은 큐브'
+        elif b.get('too_soft'):
+            text = '아주 무름 (끝까지 들어감)'
+        elif b.get('grade') == 'empty':
+            text = '모듈 없음'
+        else:
+            text = b.get('note') or ('' if dev is None else f'{what} {dev * 100:+.1f}%')
+        self.line2.setText(text)
+        src = {'calib': '저장한 기준값', 'median': '이번 측정의 중앙값', 'others': '다른 칸들의 중앙값',
+               'profile': '원하는 종류의 대표 강성'}.get(b.get('ref_src'), '-')
         self.setToolTip(
-            f'{self.slot}번 블록 ({b["height"]:g}mm)\n'
+            f'{self.slot}번 블록 ({fmt(b.get("height"), "g", "높이 기록 없음")}mm)\n'
             f'강성: {fmt(b.get("k"), ".3f")} N/mm\n'
             f'기준 강성: {fmt(b.get("ref"), ".3f")} N/mm ({src})\n'
             f'표면 높이: {fmt(b.get("z_surf"), ".2f")} mm\n'
@@ -132,10 +162,10 @@ class Heatmap(QtWidgets.QGroupBox):
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(6)
         self.cells = []
-        for i in range(rows * cols):
+        for i in range(rows * cols):              # cells[i] = i+1번 칸 (화면 위치는 grid_pos)
             c = Cell(i + 1)
             self.cells.append(c)
-            grid.addWidget(c, i // cols, i % cols)
+            grid.addWidget(c, *grid_pos(i + 1, cols))
         lay.addLayout(grid, 1)
         self.tilt = QtWidgets.QLabel('기울기: -')
         self.tilt.setObjectName('hint')
@@ -148,7 +178,8 @@ class Heatmap(QtWidgets.QGroupBox):
             c.show_block(blocks.get(c.slot), h, active == c.slot)
         t = (res or {}).get('tilt')
         if t:
-            self.tilt.setText(f'기울기: 길이 방향(1→3번) {deg(t["col_deg"])}, 폭 방향(1→4번) {deg(t["row_deg"])}'
+            self.tilt.setText(f'기울기: {cfg.AXIS_NAMES["col"]} {deg(t["col_deg"])}, '
+                              f'{cfg.AXIS_NAMES["row"]} {deg(t["row_deg"])}'
                               f'   (평면에서 벗어남 {t["rms"]:.1f}mm)')
         else:
             self.tilt.setText('기울기: -')
@@ -169,24 +200,25 @@ class InventoryDialog(QtWidgets.QDialog):
         cols = status['layout']['cols']
         form.addWidget(QtWidgets.QLabel('침대'), 0, 0)
         for i, h in enumerate(inv['bed']):
-            cb = self._combo(heights, h, False)
+            cb = self._combo(heights, h, True)         # 빈자리 채우기 모드 때문에 침대 칸도 '비어 있음' 가능
             self.bed.append(cb)
-            form.addWidget(QtWidgets.QLabel(f'{i + 1}번'), 1 + 2 * (i // cols), i % cols)
-            form.addWidget(cb, 2 + 2 * (i // cols), i % cols)
-        base = 3 + 2 * ((len(inv['bed']) - 1) // cols)
+            r, c = grid_pos(i + 1, cols)
+            form.addWidget(QtWidgets.QLabel(f'{i + 1}번'), 1 + 2 * r, c)
+            form.addWidget(cb, 2 + 2 * r, c)
+        base = 3 + 2 * max(grid_pos(i + 1, cols)[0] for i in range(len(inv['bed'])))
         form.addWidget(QtWidgets.QLabel('보관대'), base, 0)
         for j, h in enumerate(inv['rack']):
             cb = self._combo(heights, h, True)
             self.rack.append(cb)
-            form.addWidget(QtWidgets.QLabel(f'{j + 1}번'), base + 1 + 2 * (j // 4), j % 4)
-            form.addWidget(cb, base + 2 + 2 * (j // 4), j % 4)
+            form.addWidget(QtWidgets.QLabel(f'{j + 1}번'), base + 1 + 2 * (j // RACK_PER_ROW), j % RACK_PER_ROW)
+            form.addWidget(cb, base + 2 + 2 * (j // RACK_PER_ROW), j % RACK_PER_ROW)
         lay.addLayout(form)
         self.cover = QtWidgets.QCheckBox('커버가 열려 있음')
         self.cover.setChecked(bool(world.get('cover_open')))
-        self.tight = QtWidgets.QCheckBox('천이 팽팽함')
-        self.tight.setChecked(bool(world.get('tight')))
         lay.addWidget(self.cover)
-        lay.addWidget(self.tight)
+        if not cfg.COVER_ENABLED:                      # 커버가 없으면 열림/닫힘도 없다
+            self.cover.setChecked(False)
+            self.cover.hide()
         box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         box.button(QtWidgets.QDialogButtonBox.Save).setText('저장')
         box.button(QtWidgets.QDialogButtonBox.Cancel).setText('취소')
@@ -207,11 +239,74 @@ class InventoryDialog(QtWidgets.QDialog):
     def command(self):
         return {'cmd': 'set_inventory', 'bed': [c.currentData() for c in self.bed],
                 'rack': [c.currentData() for c in self.rack],
-                'cover_open': self.cover.isChecked(), 'tight': self.tight.isChecked()}
+                'cover_open': self.cover.isChecked()}
+
+
+class Toggle(QtWidgets.QWidget):
+    """노션의 ▸ 토글: 머리줄을 누르면 아래 내용(body)이 펼쳐지고 접힌다."""
+
+    def __init__(self, title, style=''):
+        super().__init__()
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.head = QtWidgets.QToolButton()
+        self.head.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.head.setArrowType(Qt.RightArrow)
+        self.head.setCheckable(True)
+        self.head.setAutoRaise(True)
+        self.head.setText(title)
+        self.head.setStyleSheet('QToolButton { border: none; padding: 4px 2px; text-align: left; '
+                                + ('color: #5b5a55; ' if style == 'header' else '') + '}')
+        self.head.toggled.connect(self.set_open)
+        self.head.setMinimumHeight(26)
+        self.body = QtWidgets.QWidget()
+        self.body.setVisible(False)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        lay.addWidget(self.head)
+        lay.addWidget(self.body)
+
+    def set_open(self, on):
+        if self.head.isChecked() != on:
+            self.head.setChecked(on)            # 다시 이 함수로 들어온다
+            return
+        self.head.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.body.setVisible(on)
+        self.updateGeometry()                   # 펼친 만큼 자리를 다시 잡게
+
+
+class ProfileRow(Toggle):
+    """고객 맞춤의 칸 하나: '▸ 1번 칸 · 단단하게'. 펼치면 세 가지 중 하나를 고른다."""
+
+    def __init__(self, i):
+        super().__init__('')
+        self.i = i
+        self.value = 'hard'
+        lay = QtWidgets.QHBoxLayout(self.body)
+        lay.setContentsMargins(22, 0, 0, 4)
+        self.opts = {}
+        grp = QtWidgets.QButtonGroup(self)
+        for v in ('soft', 'hard', 'tall'):
+            rb = QtWidgets.QRadioButton(cfg.PROFILE_NAMES[v])
+            rb.toggled.connect(lambda on, v=v: on and self.set_value(v))
+            grp.addButton(rb)
+            lay.addWidget(rb)
+            self.opts[v] = rb
+        lay.addStretch(1)
+        self.body.setMinimumHeight(28)
+        self.set_value('hard')
+
+    def set_value(self, value):
+        self.value = value
+        if not self.opts[value].isChecked():
+            self.opts[value].setChecked(True)
+        color = {'hard': INK, 'soft': '#2a78d6', 'tall': '#7a4fd0'}[value]
+        self.head.setText(f'{self.i + 1}번 칸 · {cfg.PROFILE_NAMES[value]}')
+        self.head.setStyleSheet(f'QToolButton {{ border: none; padding: 4px 2px; color: {color}; }}')
 
 
 class BedWindow(QtWidgets.QWidget):
-    def __init__(self, send, rows=2, cols=3):
+    def __init__(self, send, rows=cfg.BED_ROWS, cols=cfg.BED_COLS):
         """send: 명령 dict 를 받아 /bed/cmd 로 보내는 함수."""
         super().__init__()
         self.send = send
@@ -260,31 +355,25 @@ class BedWindow(QtWidgets.QWidget):
 
         g = QtWidgets.QGroupBox('모드')
         gl = QtWidgets.QVBoxLayout(g)
+        self.rb_repair = QtWidgets.QRadioButton('자동 보수 (주변 칸에 맞춤)')
+        self.rb_user = QtWidgets.QRadioButton('고객 맞춤 (칸마다 선택)')
         self.rb_measure = QtWidgets.QRadioButton('측정만')
         self.rb_replace = QtWidgets.QRadioButton('불량 블록 교체')
-        self.rb_tilt = QtWidgets.QRadioButton('기울기 맞춤')
-        self.rb_replace.setChecked(True)
-        for rb in (self.rb_measure, self.rb_replace, self.rb_tilt):
-            gl.addWidget(rb)
+        self.rb_repair.setChecked(True)
+        grp = QtWidgets.QButtonGroup(g)                 # 접힌 곳에 있어도 네 개 중 하나만 고른다
+        for rb in (self.rb_repair, self.rb_user, self.rb_measure, self.rb_replace):
+            grp.addButton(rb)
             rb.toggled.connect(self._refresh_buttons)
-        row = QtWidgets.QHBoxLayout()
-        self.axis = QtWidgets.QComboBox()
-        self.axis.addItem('길이 방향 (1→3번)', 'col')
-        self.axis.addItem('폭 방향 (1→4번)', 'row')
-        self.axis.currentIndexChanged.connect(self._refresh_hint)
-        self.angle = QtWidgets.QDoubleSpinBox()
-        self.angle.setRange(-20.0, 20.0)
-        self.angle.setSingleStep(0.5)
-        self.angle.setDecimals(1)
-        self.angle.setSuffix(' °')
-        self.angle.valueChanged.connect(self._refresh_hint)
-        row.addWidget(self.axis, 1)
-        row.addWidget(self.angle)
-        gl.addLayout(row)
-        self.hint = QtWidgets.QLabel()
-        self.hint.setObjectName('hint')
-        self.hint.setWordWrap(True)
-        gl.addWidget(self.hint)
+        gl.addWidget(self.rb_repair)
+        gl.addWidget(self.rb_user)
+        gl.addWidget(self._repair_box())
+        # 점검용 모드: 노션 토글처럼 접어 둔다
+        self.more = Toggle('점검용 모드', 'header')
+        more = QtWidgets.QVBoxLayout(self.more.body)
+        more.setContentsMargins(18, 0, 0, 0)
+        for rb in (self.rb_measure, self.rb_replace):
+            more.addWidget(rb)
+        gl.addWidget(self.more)
         self.confirm = QtWidgets.QCheckBox('교체 전에 계획을 확인')
         gl.addWidget(self.confirm)
         lay.addWidget(g)
@@ -321,13 +410,33 @@ class BedWindow(QtWidgets.QWidget):
         gl = QtWidgets.QVBoxLayout(g)
         gl.setSpacing(1)
         self.steps = []
-        for _ in range(12):
+        for _ in range(len(STEP_NAMES) - 1):
             lb = QtWidgets.QLabel()
             self.steps.append(lb)
             gl.addWidget(lb)
         lay.addWidget(g)
         lay.addStretch(1)
         return w
+
+    def _repair_box(self):
+        """고객 맞춤: 칸마다 ▸ 토글을 펼쳐 부드럽게 / 단단하게 / 높게 중 하나를 고른다."""
+        self.repair_box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(self.repair_box)
+        lay.setContentsMargins(18, 0, 0, 4)
+        lay.setSpacing(0)
+        self.profile = []
+        for i in range(len(cfg.P_BED)):
+            row = ProfileRow(i)
+            self.profile.append(row)
+            lay.addWidget(row)
+        return self.repair_box
+
+    def set_profile(self, i, value):
+        """i번 칸(0부터)의 원하는 종류를 바꾼다: 'hard' / 'soft' / 'tall'."""
+        self.profile[i].set_value(value)
+
+    def profile_values(self):
+        return [r.value for r in self.profile]
 
     def _side(self):
         w = QtWidgets.QWidget()
@@ -360,12 +469,18 @@ class BedWindow(QtWidgets.QWidget):
 
     # ── 버튼 ──────────────────────────────────────────────────────────
     def _mode(self):
-        return 'measure' if self.rb_measure.isChecked() else 'tilt' if self.rb_tilt.isChecked() else 'replace'
+        if self.rb_measure.isChecked():
+            return 'measure'
+        if self.rb_repair.isChecked() or self.rb_user.isChecked():
+            return 'repair'
+        return 'replace'
 
     def _start(self):
         cmd = {'cmd': 'start', 'mode': self._mode(), 'confirm': self.confirm.isChecked()}
-        if cmd['mode'] == 'tilt':
-            cmd.update(axis=self.axis.currentData(), angle=self.angle.value())
+        if cmd['mode'] == 'repair':
+            cmd['target'] = 'user' if self.rb_user.isChecked() else 'auto'
+            if cmd['target'] == 'user':
+                cmd['profile'] = self.profile_values()
         self.send(cmd)
 
     def _calibrate(self):
@@ -385,10 +500,9 @@ class BedWindow(QtWidgets.QWidget):
     def _refresh_buttons(self):
         st = self.status['state'] if self.status else None
         idle = st in ('idle', 'done', 'warning', 'error', 'stopped')
-        tilt = self.rb_tilt.isChecked()
-        self.axis.setEnabled(tilt)
-        self.angle.setEnabled(tilt)
-        self.hint.setVisible(tilt)
+        self.repair_box.setVisible(self.rb_user.isChecked())
+        if self.rb_measure.isChecked() or self.rb_replace.isChecked():
+            self.more.set_open(True)                    # 점검용 모드를 골랐으면 펼쳐 둔다
         self.confirm.setEnabled(not self.rb_measure.isChecked())
         self.b_start.setEnabled(idle)
         self.b_stop.setEnabled(st in ('running', 'confirm'))
@@ -396,19 +510,6 @@ class BedWindow(QtWidgets.QWidget):
         self.b_cancel.setVisible(st == 'confirm')
         for b in (self.b_home, self.b_calib, self.b_inv):
             b.setEnabled(idle)
-
-    def _refresh_hint(self):
-        ach = (self.status or {}).get('achievable')
-        if not ach:
-            self.hint.setText('')
-            return
-        opts = ach[self.axis.currentData()]
-        if not opts:
-            self.hint.setText('지금 가진 블록으로는 이 방향 기울기를 만들 수 없습니다.')
-            return
-        near = min(opts, key=lambda a: abs(a - self.angle.value()))
-        self.hint.setText('만들 수 있는 각도: ' + ', '.join(deg(a) for a in opts)
-                          + f'\n입력한 값과 가장 가까운 {deg(near)} 로 맞춥니다.')
 
     # ── 상태 표시 ─────────────────────────────────────────────────────
     def add_log(self, text):
@@ -426,21 +527,20 @@ class BedWindow(QtWidgets.QWidget):
             self.message.setText('공정 노드(bed_process)를 기다리는 중입니다.')
             self.map1.show_result(None, None, None)
             self.map2.show_result(None, None, None)
-            self._show_steps(0, None, [''] * 13)
+            self._show_steps(0, None, STEP_NAMES)
             self._refresh_buttons()
-            self._refresh_hint()
             self.legend.setText('')
             return
         detail = f'{s["step"]}단계 {s["step_name"]}' + (f' · {s["detail"]}' if s.get('detail') else '')
         self.message.setText(s.get('message') or (detail if s['state'] == 'running' else ''))
 
         bed = s['inventory']['bed']
-        second_active = s['step'] >= 11
+        second_active = s['step'] >= STEP_REMEASURE
         self.map1.show_result(s.get('first'), bed if not s.get('second') else None,
                               None if second_active else s.get('active_slot'))
         self.map2.show_result(s.get('second'), bed if second_active else None,
                               s.get('active_slot') if second_active else None)
-        self._show_steps(s['step'], s['state'], s.get('step_names') or [''] * 13)
+        self._show_steps(s['step'], s['state'], s.get('step_names') or STEP_NAMES)
         self._show_plan(s.get('plan'))
         rack = ', '.join(f'{j + 1}번 ' + ('비어 있음' if h is None else f'{h:g}mm')
                          for j, h in enumerate(s['inventory']['rack']))
@@ -450,7 +550,7 @@ class BedWindow(QtWidgets.QWidget):
         self.inv.setText(
             '침대: ' + ' / '.join(f'{h:g}' if h is not None else '빈칸' for h in bed) + ' mm\n'
             f'보관대: {rack}\n'
-            f'커버: {"열림" if w.get("cover_open") else "닫힘"}, 천: {"팽팽함" if w.get("tight") else "느슨함"}\n'
+            f'커버: {("열림" if w.get("cover_open") else "닫힘") if cfg.COVER_ENABLED else "없음"}\n'
             f'기준 강성 [N/mm]: {calib or "저장 안 됨 (이번 측정의 중앙값과 비교)"}')
         lay = s['layout']
         sw = '<span style="background:{0}; color:{0};">■■</span> {1}'
@@ -458,9 +558,10 @@ class BedWindow(QtWidgets.QWidget):
             sw.format(GRADE['ok'][0], f'✓ 정상 (기준 강성과 차이 {lay["warn"] * 100:.0f}% 미만)'),
             sw.format(GRADE['warn'][0], f'! 주의 ({lay["warn"] * 100:.0f}~{lay["fail"] * 100:.0f}%)'),
             sw.format(GRADE['fail'][0], f'✕ 불량 ({lay["fail"] * 100:.0f}% 이상, 교체 대상)'),
-            sw.format(GRADE['nodata'][0], '? 측정 실패')]))
+            sw.format(GRADE['nodata'][0], '? 측정 실패'),
+            sw.format(GRADE['empty'][0], '○ 빈칸'),
+            sw.format(GRADE['mismatch'][0], '≠ 맞지 않음 (자동 보수)')]))
         self._refresh_buttons()
-        self._refresh_hint()
 
     def _show_steps(self, cur, state, names):
         for n, lb in enumerate(self.steps, 1):
@@ -474,23 +575,68 @@ class BedWindow(QtWidgets.QWidget):
             lb.setText(f'{mark}  {n}. {names[n] if n < len(names) else ""}')
             lb.setStyleSheet(style)
 
+    def _show_repair_plan(self, p):
+        head, lines = _repair_plan_text(p)
+        done = p.get('done', 0)
+        moves = p.get('moves') or []
+        if moves:
+            lines += ['이동:'] + [('✓ ' if i < done else '○ ') + t for i, t in enumerate(moves)]
+        self.plan_head.setText(head)
+        self.plan_list.setText('\n'.join(lines))
+
     def _show_plan(self, p):
         if not p:
             self.plan_head.setText('-')
             self.plan_list.setText('')
             return
-        if p['type'] == 'tilt':
-            head = (f'요청 {deg(p["request_deg"])} → 가장 가까운 배치: 길이 {deg(p["col_deg"])}, 폭 {deg(p["row_deg"])}\n'
-                    '목표 높이: ' + ' / '.join(f'{h:g}' for h in p['heights']) + ' mm')
-        else:
-            head = f'불량 {p["faulty"]}번을 같은 높이 예비 블록으로 교체'
-            if p.get('skipped'):
-                head += f'\n예비 블록이 없어 못 바꾸는 칸: {p["skipped"]}번'
+        if p['type'] == 'repair':
+            self._show_repair_plan(p)
+            return
+        head = f'불량 {p["faulty"]}번을 같은 높이 예비 블록으로 교체'
+        if p.get('skipped'):
+            head += f'\n예비 블록이 없어 못 바꾸는 칸: {p["skipped"]}번'
         self.plan_head.setText(head)
         done = p.get('done', 0)
         moves = p.get('moves') or []
         self.plan_list.setText('\n'.join(('✓ ' if i < done else '○ ') + t for i, t in enumerate(moves))
                                or '옮길 블록 없음')
+
+
+def _repair_plan_text(p):
+    """자동 보수 계획을 (머리말, 목록) 글자로."""
+    if p.get('target_mode') == 'user':
+        head = '고객 맞춤 (' + ' / '.join(f'{i + 1}번 {cfg.PROFILE_NAMES[v]}'
+                                             for i, v in enumerate(p.get('profile') or [])) + ')'
+    else:
+        head = '자동 보수 (주변 칸 강성에 맞춤)'
+    head += f'\n빈칸 {p.get("empties") or "없음"} / 맞지 않는 칸 {p.get("mismatch") or "없음"}'
+    lines = []
+    if p.get('thr'):
+        lines.append(f'종류 경계 {p["thr"]:.2f} N/mm')
+    if p.get('rack'):
+        lines.append('보관대 큐브 측정 (침대 기준 환산):')
+        chosen = {c['rack'] for c in p.get('choice', [])}
+        for r in p['rack']:
+            mark = '★ ' if r['slot'] in chosen else '   '
+            if r.get('empty'):
+                val = '비어 있음'
+            elif r.get('tall'):
+                val = '높음 (살짝 닿기' + (f', +{r["dz"]:.1f} mm)' if r.get('dz') is not None else ')')
+            elif r.get('k_bed') is None:
+                val = (f'측정 실패 ({r["note"]})' if r.get('note')
+                       else '닿음, 누르기 대기' if r.get('z0') is not None else '대기')
+            else:
+                val = f'{r["k_bed"]:.2f} N/mm'
+                if r.get('cls'):
+                    val += ' ' + CLS_NAMES[r['cls']]
+                elif r.get('tall'):
+                    val += ' 높음'
+            lines.append(f'{mark}{r["slot"]}번: {val}')
+    if p.get('choice'):
+        lines.append('선택:')
+        lines += [f'  보관대 {c["rack"]}번 → {c["slot"]}번 ' + ('(교체)' if c.get('why') == 'mismatch' else '(빈칸)')
+                  for c in p['choice']]
+    return head, lines
 
 
 def make_app(args=None):

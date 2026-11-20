@@ -28,6 +28,9 @@ setup(
             'move_to_teach = pjt_test1.move_to_teach:main',
             'measure_teach_force = pjt_test1.measure_teach_force:main',
             'gripper = pjt_test1.gripper:main',
+            'stiffness_test = pjt_test1.stiffness_test:main',
+            'bring_test = pjt_test1.bring_test:main',
+            'repair_test = pjt_test1.repair_test:main',
         ],
     },
 )

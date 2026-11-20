@@ -69,6 +69,7 @@ def main(args=None):
     path = bed_store.choose_teach_file([opt.file] if opt.file else [])
     if path is None:
         return
+    bed_store.use_sim_data_if_sim(path)     # 가짜 로봇용 교시 파일이면 기록을 bed_data_sim 에 따로 저장
     try:
         points = list(bed_store.load_teach(path).values())
     except (OSError, ValueError, KeyError) as e:

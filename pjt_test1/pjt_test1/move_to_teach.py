@@ -3,6 +3,7 @@
 #   ros2 run pjt_test1 move_to_teach                 # 파일 목록에서 선택
 #   ros2 run pjt_test1 move_to_teach 파일경로.json    # 파일 바로 지정
 #   ros2 run pjt_test1 move_to_teach --movel         # posx 로 직선 이동 (기본은 posj 로 movej)
+#   posj 가 없는 점(좌표로 계산한 점)은 --movel 이 없어도 posx 로 직선 이동한다
 #
 # 파일 위치: ~/ws_cobot_pjt/teach_points/  (robot_setting direct_teach 가 저장하는 곳)
 #
@@ -79,7 +80,8 @@ def choose_file(args):
 
 def print_points(points):
     for i, p in enumerate(points, 1):
-        print(f'  {i}. {p["name"]:10s} posj={fmt(p["posj"])}')
+        pj = fmt(p['posj']) if p.get('posj') else '없음 (posx 로 직선 이동)'
+        print(f'  {i}. {p["name"]:10s} posj={pj}')
         print(f'     {"":10s} posx={fmt(p["posx"])}  (TCP: {p.get("tcp") or "없음"})')
 
 
@@ -142,7 +144,8 @@ def main(args=None):
         if get_robot_state() != STATE_STANDBY:
             report_fault('STANDBY 가 아니라 이동할 수 없습니다')
             return False
-        if use_movel:
+        linear = use_movel or not p.get('posj')   # posj 가 없는 점(계산한 점)은 posx 로만 갈 수 있다
+        if linear:
             log.info(f'[{p["name"]}] movel → posx={fmt(p["posx"])}')
             ret = movel(posx(p['posx']), vel=VEL_X, acc=ACC_X, ref=DR_BASE)
         else:
@@ -152,7 +155,7 @@ def main(args=None):
             report_fault(f'[{p["name"]}] 이동 실패')
             return False
         # 도착 확인: movej 는 관절각, movel 은 툴 끝 위치로 비교
-        if use_movel:
+        if linear:
             cur, _ = get_current_posx(ref=DR_BASE)
             err = sum((c - t) ** 2 for c, t in zip(cur[:3], p['posx'][:3])) ** 0.5
             log.info(f'[{p["name"]}] 도착. 위치 오차 {err:.2f} mm')
@@ -167,12 +170,13 @@ def main(args=None):
             report_fault('STANDBY 가 아닙니다. 먼저 servo_on 을 실행하세요')
             return
 
-        if use_movel:
+        if use_movel or any(not p.get('posj') for p in points):
             tcp = get_tcp()
-            bad = [p['name'] for p in points if p.get('tcp', '') != tcp]
+            bad = [p['name'] for p in points
+                   if (use_movel or not p.get('posj')) and p.get('tcp', '') != tcp]
             if bad:
                 log.error(f'현재 TCP({tcp or "없음"})와 교시할 때 TCP 가 다른 위치: {bad}')
-                log.error('--movel 은 TCP 가 같아야 합니다. --movel 없이(movej) 실행하세요.')
+                log.error('posx 이동은 TCP 가 같아야 합니다. TCP 를 맞추거나 파일의 tcp 값을 고치세요.')
                 return
 
         if get_robot_mode() != ROBOT_MODE_AUTONOMOUS:

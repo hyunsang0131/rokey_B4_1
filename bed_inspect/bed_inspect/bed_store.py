@@ -21,18 +21,52 @@ def teach_path(args=()):
     return os.path.expanduser(path)
 
 
+# 팀원(pjt_test1 repair_test) 교시 파일 이름 → 공정 이름: pin_b{n} → bed_{n}, tray_b{n} → rack_{n}
+#   pin_b{n}_down / _up 은 잡는 높이 / 올라올 자리로 붙여 둔다 (bed_tasks.move_block 이 그대로 씀)
+TEAM_PREFIX = {'pin_b': 'bed_', 'tray_b': 'rack_'}
+
+
 def load_teach(path):
-    """direct_teach 가 만든 JSON → {이름: {'posj': [...], 'posx': [...], 'tcp': ...}}."""
-    with open(path) as f:
-        points = json.load(f)
-    return {p['name']: p for p in points}
+    """교시 JSON → {이름: {'posj': [...], 'posx': [...], 'tcp': ...}}.
+
+    path 에 쉼표로 여러 파일을 줄 수 있다 (예: 'bed_fin.json,exchange_fin.json').
+    팀원 파일(pin_b1~6, tray_b1~6 + _down/_up)도 그대로 읽어서 bed_1~6, rack_1~6 으로 바꾼다.
+    """
+    points = []
+    for one in str(path).split(','):
+        one = os.path.expanduser(one.strip())
+        if not one:
+            continue
+        with open(one) as f:
+            points += json.load(f)
+    raw = {p['name']: p for p in points}
+    out = dict(raw)
+    for old, new in TEAM_PREFIX.items():
+        for n in range(1, 7):
+            base = raw.get(f'{old}{n}')
+            if base is None or f'{new}{n}' in raw:
+                continue
+            p = dict(base, name=f'{new}{n}')
+            if f'{old}{n}_down' in raw:
+                p['down'] = list(raw[f'{old}{n}_down']['posx'])
+            if f'{old}{n}_up' in raw:
+                p['up'] = list(raw[f'{old}{n}_up']['posx'])
+            out[f'{new}{n}'] = p
+    return out
 
 
 def required_names():
-    names = [cfg.P_HOME, cfg.P_DISCARD, cfg.P_COVER_VIA] + list(cfg.P_BED) + list(cfg.P_RACK)
-    for n in (cfg.P_ROLLER, cfg.P_COVER_GRIP, cfg.P_COVER_OPEN):
-        names += [n, n + cfg.APP_SUFFIX]
-    return names
+    # 꼭 필요한 것: 침대 6칸 + 교체 트레이 6칸 (12개).
+    # home 은 없으면 기본 관절각(cfg.HOME_POSJ), discard(버리는 통)는 불량 교체(replace) 모드에서만 필요.
+    # 커버는 교시하지 않고 bed_config 의 좌표(COVER_*)로 움직인다
+    return list(cfg.P_BED) + list(cfg.P_RACK)
+
+
+def fill_defaults(points):
+    """교시 파일에 home 이 없으면 기본 관절각으로 채운다."""
+    if cfg.P_HOME not in points:
+        points[cfg.P_HOME] = {'name': cfg.P_HOME, 'posj': list(cfg.HOME_POSJ), 'posx': None, 'tcp': None}
+    return points
 
 
 def missing_names(points):
@@ -111,11 +145,11 @@ def check_inventory(bed, rack):
     if len(rack) != len(cfg.P_RACK):
         return f'보관대 자리는 {len(cfg.P_RACK)}개여야 합니다.'
     for h in bed:
-        if h not in cfg.BLOCK_HEIGHTS:
-            return f'침대 칸의 높이는 {cfg.BLOCK_HEIGHTS} 중 하나여야 합니다 (입력: {h}).'
+        if h is not None and h not in cfg.INVENTORY_HEIGHTS:
+            return f'침대 칸의 높이는 {cfg.INVENTORY_HEIGHTS} 중 하나이거나 비어 있어야 합니다 (입력: {h}).'
     for h in rack:
-        if h is not None and h not in cfg.BLOCK_HEIGHTS:
-            return f'보관대의 높이는 {cfg.BLOCK_HEIGHTS} 중 하나이거나 비어 있어야 합니다 (입력: {h}).'
+        if h is not None and h not in cfg.INVENTORY_HEIGHTS:
+            return f'보관대의 높이는 {cfg.INVENTORY_HEIGHTS} 중 하나이거나 비어 있어야 합니다 (입력: {h}).'
     return None
 
 
