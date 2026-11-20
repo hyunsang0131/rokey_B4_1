@@ -534,7 +534,14 @@ class Job:
             self.log(f'  참고: 열기 폭 {c["grip_open_width"]:g} mm, 잡는 변 {side:g} mm → 한쪽 여유 '
                      f'{(c["grip_open_width"] - side) / 2:.1f} mm (걸리면 힘으로 멈춤)')
         for w in res['warnings']:
-            if input(f'⚠ {w}\n  그래도 잡을까요? (y/N) ').strip().lower() != 'y':
+            if isinstance(self.io, SimIO):           # 시뮬은 묻지 않고 계속 (경고는 위에 출력됨)
+                continue
+            try:
+                ans = input(f'⚠ {w}\n  그래도 잡을까요? (y/N) ')
+            except EOFError:                         # 입력이 없으면(파이프 등) 잡지 않는다
+                ans = ''
+            if ans.strip().lower() != 'y':
+                self.log('  잡지 않고 끝냅니다.')
                 return res
         c_tray = t['top'][5]
         cg = grasp_c(res['theta'], c['grasp_side'], c['probe_ori'][2], c_tray)
