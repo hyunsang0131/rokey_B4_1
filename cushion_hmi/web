@@ -144,7 +144,7 @@
     const HERO_DEMO_CONFIGS = [
       {
         title: '허리 지지 강화 모드',
-        desc: '상체·허리는 12.0N 탄탄한 지지, 하체는 6.8N 높은 쿠션으로 설계',
+        desc: '상체·허리는 약 12N/mm 탄탄한 지지, 하체는 약 7N/mm 높은 쿠션으로 설계',
         cells: [
           { cell_id: 1, hardness: '40A', height: 'NORMAL' },
           { cell_id: 2, hardness: '40A', height: 'NORMAL' },
@@ -156,7 +156,7 @@
       },
       {
         title: '어깨 압력 분산 모드',
-        desc: '어깨 부위만 6.8N 부드러운 롱 쿠션으로 교체하여 체압 완화',
+        desc: '어깨 부위만 약 7N/mm 부드러운 롱 쿠션으로 교체하여 체압 완화',
         cells: [
           { cell_id: 1, hardness: '10A', height: 'HIGH' },
           { cell_id: 2, hardness: '10A', height: 'HIGH' },
@@ -185,7 +185,7 @@
       { code: 'STEP 01', name: '주문 데이터 수신 및 셀 검증' },
       { code: 'STEP 02', name: '매트리스 커버 개방' },
       { code: 'STEP 03', name: '6존 독립 쿠션 모듈 교체 및 삽입' },
-      { code: 'STEP 04', name: '촉각 센서 강성(12N / 6.8N) 전수 검사' },
+      { code: 'STEP 04', name: '촉각 센서 강성(약 12N/mm / 약 7N/mm) 전수 검사' },
       { code: 'STEP 05', name: '커버 체결 및 출고 준비 완료' },
     ];
 
@@ -326,7 +326,7 @@
                           isSoft ? 'text-[#6E6254]' : 'text-white/80'
                         }`}
                       >
-                        {isSoft ? '6.8N' : '12.0N'}
+                        {isSoft ? '약 7N/mm' : '약 12N/mm'}
                       </span>
                       {isHigh && (
                         <span className="mt-1 px-1.5 py-[1px] bg-[#1A1A1A] text-white text-[8px] tracking-wider uppercase">
@@ -390,11 +390,11 @@
           <div className="absolute bottom-3 left-4 flex items-center gap-4 text-[11px] text-[#555555] bg-white/85 backdrop-blur-sm px-3 py-1.5 border border-[#E5E5E5]">
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 bg-[#53687A] inline-block" />
-              탄탄함 (12.0N)
+              탄탄함 (약 12N/mm)
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 bg-[#F4ECE0] border border-[#C9BBA6] inline-block" />
-              부드러움 (6.8N)
+              부드러움 (약 7N/mm)
             </span>
           </div>
         </div>
@@ -535,7 +535,8 @@
             cell_id: id,
             position_label: m.label,
             hardness_code: m.hardness,
-            stiffness_N: isSoft ? 6.8 : 12.0,
+            stiffness_N_mm: isSoft ? 7 : 12,
+            stiffness_label: isSoft ? '약 7N/mm' : '약 12N/mm',
             height: m.height,
           };
         });
@@ -1086,7 +1087,7 @@
                     <div className="mt-4 pt-4 border-t border-[#E2E0D8] grid grid-cols-3 gap-2 text-center text-[12px]">
                       <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
                         <span className="text-[#767676] block text-[11px]">
-                          딱딱함 (12.0N)
+                          딱딱함 (약 12N/mm)
                         </span>
                         <strong className="text-[#1A1A1A]">
                           {hardCount} / {STOCK_LIMITS.HARD}개 사용
@@ -1094,7 +1095,7 @@
                       </div>
                       <div className="bg-white py-2 px-2 border border-[#E5E5E5]">
                         <span className="text-[#767676] block text-[11px]">
-                          부드러움 (6.8N)
+                          부드러움 (약 7N/mm)
                         </span>
                         <strong className="text-[#1A1A1A]">
                           {softCount} / {STOCK_LIMITS.SOFT}개 사용
@@ -1171,7 +1172,7 @@
                                     isAct ? 'text-white/80' : 'text-[#767676]'
                                   }`}
                                 >
-                                  {item.hardness === '10A' ? '6.8N' : '12.0N'} ·{' '}
+                                  {item.hardness === '10A' ? '약 7N/mm' : '약 12N/mm'} ·{' '}
                                   {item.height === 'HIGH' ? '높음' : '기본'}
                                 </span>
                               </button>
@@ -1200,7 +1201,7 @@
                               </span>
                             </div>
                             <span className="block text-[12px] text-[#666666] mt-1">
-                              강성 12.0N · 고밀도 지지
+                              강성 약 12N/mm · 고밀도 지지
                             </span>
                           </button>
 
@@ -1219,7 +1220,7 @@
                               </span>
                             </div>
                             <span className="block text-[12px] text-[#666666] mt-1">
-                              강성 6.8N · 소프트 쿠션
+                              강성 약 7N/mm · 소프트 쿠션
                             </span>
                           </button>
                         </div>
@@ -1292,7 +1293,7 @@
                   {stockAlertMessage}
                 </h3>
                 <p className="text-[13px] text-[#666666] mt-2.5 leading-relaxed break-keep">
-                  현재 보유 수량은 딱딱함(12.0N) 최대 6개, 부드러움(6.8N) 최대 2개, 높은 지지 최대 2개입니다.
+                  현재 보유 수량은 딱딱함(약 12N/mm) 최대 6개, 부드러움(약 7N/mm) 최대 2개, 높은 지지 최대 2개입니다.
                 </p>
                 <button
                   onClick={() => setStockAlertMessage('')}
@@ -1322,13 +1323,13 @@
                 <div className="py-5 space-y-4 text-[13px] text-[#444444] leading-relaxed">
                   <div className="p-4 bg-[#F8F8F8] border border-[#EAEAEA]">
                     <strong className="text-[#1A1A1A] block mb-1">
-                      1. 딱딱함 (12.0N / Firm)
+                      1. 딱딱함 (약 12N/mm / Firm)
                     </strong>
                     척추와 골반을 단단하게 받쳐주어 허리 처짐을 방지하는 고밀도 지지 모듈입니다. (보유 6개)
                   </div>
                   <div className="p-4 bg-[#FAF8F4] border border-[#EAE6DF]">
                     <strong className="text-[#1A1A1A] block mb-1">
-                      2. 부드러움 (6.8N / Soft)
+                      2. 부드러움 (약 7N/mm / Soft)
                     </strong>
                     어깨나 특정 부위의 체압을 부드럽게 감싸 안아주는 저경도 쿠션 모듈입니다. (보유 2개)
                   </div>
@@ -1424,8 +1425,8 @@
                                   #{m.cell_id} {m.position_label}
                                 </strong>
                                 <span className="block text-[#666666] mt-0.5">
-                                  {m.stiffness_N === 6.8 ? '부드러움' : '딱딱함'} (
-                                  {m.stiffness_N}N)
+                                  {m.hardness_code === '10A' ? '부드러움' : '딱딱함'} (
+                                  {m.stiffness_label})
                                 </span>
                               </div>
                               <span className="px-2 py-0.5 bg-[#F3F3F3] text-[#1A1A1A] text-[11px] font-medium">
