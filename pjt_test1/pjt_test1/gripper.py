@@ -83,15 +83,33 @@ class Gripper:
         d = self.dr
         want = {1: 1 if close else 0, 2: 1 if (both or not close) else 0}
         ok = True
-        # 항상 (0, 0) 을 먼저 거친다. WebLogic 은 입력이 '바뀌는 순간'에 동작을 실행하므로,
-        # 이미 같은 값이 켜져 있으면(예: 닫기 → 닫기, WebLogic 설정을 바꾼 뒤) 다시 실행되지 않는다.
-        # (0, 0) 은 WebLogic 에 동작이 없는 조합이라 거쳐도 안전하다.
-        for idx in (1, 2):
-            ok = d.set_digital_output(idx, 0) == 0 and ok
-        time.sleep(0.1)
-        for idx, val in want.items():
-            if val:
-                ok = d.set_digital_output(idx, val) == 0 and ok
+        try:
+            cur = {idx: int(d.get_digital_output(idx)) for idx in (1, 2)}
+        except Exception:
+            cur = None
+        if cur is not None and any(v not in (0, 1) for v in cur.values()):
+            cur = None                                   # 읽기 실패(-1)
+        if cur is None or cur == want:
+            # 같은 명령을 다시 보낼 때(또는 현재 값을 모를 때)는 (0, 0) 을 거친다.
+            # WebLogic 은 입력이 '바뀌는 순간'에 동작을 실행하므로, 같은 값이면 다시 실행되지 않는다.
+            # (0, 0) 은 WebLogic 에 동작이 없는 조합이라 거쳐도 안전하다.
+            for idx in (1, 2):
+                ok = d.set_digital_output(idx, 0) == 0 and ok
+            time.sleep(0.1)
+            for idx, val in want.items():
+                if val:
+                    ok = d.set_digital_output(idx, val) == 0 and ok
+        else:
+            # 다른 동작으로 바꿀 때는 바뀌는 신호만, 끄기 먼저 → 켜기 순서로 바꾼다.
+            # 예: 잡기 (1,1) → 열기 (0,1) 은 DO1 만 끈다. 예전처럼 (0,0) 을 거치면
+            # (1,1)→(0,1)→(0,0)→(0,1) 로 열기가 끊겼다 다시 들어가서, 놓을 때 한 번 더 조였다 열렸다.
+            # 닫기 (1,0) ↔ 열기 (0,1) 처럼 둘 다 바뀌면 끄기 먼저라 (0,0) 을 거친다 (잡기 (1,1) 은 안 거침).
+            for idx in (1, 2):
+                if cur[idx] and not want[idx]:
+                    ok = d.set_digital_output(idx, 0) == 0 and ok
+            for idx in (1, 2):
+                if want[idx] and not cur[idx]:
+                    ok = d.set_digital_output(idx, 1) == 0 and ok
         if not ok:
             self.log.error('set_digital_output 실패')
         return ok

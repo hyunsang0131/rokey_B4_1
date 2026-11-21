@@ -16,7 +16,7 @@
   "h_max": 30.0
  },
  "grasp_side": "long",
- "grasp_depth": 15.0,
+ "grasp_depth": 17.0,
  "z_travel": 170.0,
  "tray_file": "~/ws_cobot_pjt/teach_points/exchange_fin.json"
 }

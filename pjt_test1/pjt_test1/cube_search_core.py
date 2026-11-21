@@ -352,12 +352,16 @@ class CubeSearcher:
 
     # ── 전체 ──────────────────────────────────────────────────────────
     def run(self):
-        c = self.cfg
         hit = self.coarse()
         if hit is None:
             raise SearchError('영역 전체를 터치했지만 큐브가 없습니다.')
         x0, y0, self.z_top = hit
         est = self.round1((x0, y0))
+        return self.refine(est)
+
+    def refine(self, est):
+        """대략 추정(est: cx, cy, th)에서 2차 정밀(변에 수직 이분 탐색)과 윗면 높이로 최종 결과를 만든다."""
+        c = self.cfg
         z = self.measure_top(est['cx'], est['cy'])     # 가장자리가 아닌 가운데에서 윗면을 다시 재서 이후 누르는 깊이를 맞춘다
         if z is not None:
             self.z_top = z

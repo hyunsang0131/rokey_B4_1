@@ -34,6 +34,7 @@ import random
 import sys
 import time
 
+from pjt_test1.cube_search_bayes import BayesSearcher, HybridSearcher
 from pjt_test1.cube_search_core import CubeSearcher, SearchError, grasp_c, rect_sdf
 
 import numpy as np
@@ -51,7 +52,7 @@ DEFAULT_CFG = {
     'probe_ori': [168.25, 179.97, -11.77],
     'grid_step': 25.0,
     'coarse_min_rise': 5.0,
-    'hover': 8.0,
+    'hover': 4.0,                  # 누르기 시작 높이: 윗면 + 이만큼 (공중 구간만 줄어듦 — 영점·누르는 속도·힘 기준은 그대로) [mm]
     'press_depth': 2.0,            # 큐브 윗면보다 이만큼 더 눌러 '있음' 확인 [mm] (실측 강성 11~14 N/mm → 약 24 N)
     'vel_coarse': 20.0,            # 거친 격자 하강 [mm/s] (힘 갱신 0.1 s → 최대 2 mm 더 눌림 ≈ 24 N)
     'vel_press': 5.0,
@@ -83,16 +84,48 @@ DEFAULT_CFG = {
     'size_tol_mm': 3.0,
     'grasp_side': 'long',
     'grasp_depth': 15.0,
-    'floor_clear': 4.0,
+    'floor_clear': 2.0,            # 잡을 때 손가락 끝을 영역 바닥에서 이만큼 위까지 (4 → 2: 잡는 면적 넓힘)
     'grasp_f_limit': 12.0,
     'place_clear': 1.0,
     'settle': 0.3,
+    'hybrid_pos_std': 1.0,         # hybrid: 확률 탐색을 끝내는 중심 표준편차 [mm] (grid 1차 윤곽 정도로 좁혀 2차 정밀 점이 모서리에서 멀게)
+    'hybrid_ang_std': 3.0,         # hybrid: 확률 탐색을 끝내는 각도 표준편차 [deg]
+    'hybrid_repeat_deg': 4.0,      # hybrid: 2차 정밀 각도가 대략값과 이보다 다르면 한 번 더 (grid 의 refine_repeat_deg 와 같게)
+    'squeeze_pos_std': 1.5,        # squeeze: 대략 탐색을 끝내는 중심 표준편차 [mm] (3σ + 큐브 반폭이 열기 반폭 안)
+    'squeeze_ang_std': 4.0,        # squeeze: 대략 탐색을 끝내는 각도 표준편차 [deg] (끼우면 각도는 기계적으로 맞음)
+    'pre_align_extra': 5.0,        # 끼워 정렬은 잡는 높이보다 이만큼 더 깊게 [mm]
+    'pre_align': True,             # 잡기 전에 짧은 변(41)으로 끼워 정렬 → 트레이에 놓는 위치가 탐지 오차와 무관
+    'squeeze_wait': 1.5,           # squeeze: 닫기(5 N)로 끼운 채 기다림 [s]
+    'grip_wait': 1.0,              # 그리퍼 잡기/열기 명령 뒤 손가락이 다 움직일 때까지 기다림 [s] (DO 제어라 명령이 바로 끝남)
     'z_travel': 170.0,
     'tray_file': '~/ws_cobot_pjt/teach_points/exchange_fin.json',
     'tray_floor_z': None,
     'tray_check': True,
     'tray_check_from': 45.0,
     'tray_order': [1, 2, 3, 4, 5, 6],
+    # 탐지 방법: 'hybrid' = 대략 확률 탐색 → grid 와 같은 2차 정밀로 마무리 (기본), 'grid' = 기존 (실물 정확도 검증), 'bayes' = 확률 탐색만, 'squeeze' = 끼워 정렬 (실물에서 중심 어긋남)
+    'search_method': 'hybrid',
+    'bayes_particles': 20000,      # 후보(중심, 각도, 손가락 끝 크기) 개수
+    'bayes_candidates': 400,       # 매 터치마다 비교할 터치 위치 후보 수
+    'bayes_eval_particles': 3000,  # 정보 이득 계산에 쓰는 파티클 수
+    'bayes_sigma': 0.8,            # 가장자리 '있음/없음' 애매한 폭 [mm] (시뮬 ±0.5~1 mm)
+    'bayes_sigma_coarse': 2.0,     # 거친 격자/윗면 재기 '닿음' 의 애매한 폭 [mm] (깊이 눌러서 더 넓게 닿음)
+    'bayes_flip': 0.02,
+    'bayes_corner_mm': 10.0,       # 큐브 모서리에서 변을 따라 이 안쪽은 손가락 끝 모양 때문에 애매 → 아래 폭으로 약하게만 믿음 [mm]
+    'bayes_sigma_corner': 3.0,
+    'bayes_offset_sd': 2.5,        # 변이 밀려 보이는 양이 finger_ex/ey 예상값에서 벗어날 수 있는 정도 [mm]
+    'bayes_offset_min': -2.0,      # 변이 밀려 보이는 양 범위 [mm] (finger_max 까지)            # 터치 결과가 통째로 틀릴 확률
+    'bayes_pos_std': 0.5,          # 끝내는 조건: 중심 표준편차 [mm] (시뮬 40회: 실제 오차 평균 0.34 mm, 기존 방식 0.57)
+    'bayes_ang_std': 1.2,          # 끝내는 조건: 각도 표준편차 [deg] (시뮬 40회: 실제 오차 평균 0.68°, 기존 방식 0.82°)
+    'bayes_max_touches': 80,
+    'bayes_ig_min': 0.01,          # 이보다 정보 이득이 작으면 그만 [bit]
+    'bayes_top_after': 3.0,        # 중심이 이만큼 좁혀지면 중심에서 윗면을 다시 잰다 [mm]
+    'bayes_ess_frac': 0.5,
+    'bayes_mcmc_steps': 6,
+    'bayes_mcmc_scale': 0.6,
+    'bayes_fail_std': 3.0,         # 끝났는데 중심이 이보다 퍼져 있으면 실패 [mm]
+    'bayes_bad_mm': 3.0,           # 예측과 이만큼 넘게 어긋난 터치 = 모양과 안 맞음 (가장자리 애매함보다 크게) [mm]
+    'bayes_bad_max': 2,            # 이보다 많으면 중단 (큐브 크기 설정 틀림, 큐브 2개, 밀림)
 }
 
 # 시뮬레이터 기본 영역 (설정 파일의 area 가 비어 있을 때)
@@ -371,6 +404,8 @@ class SimIO:
         self.t_sim = 0.0
         self.tray_full = set()
         self.held = False
+        self.grip_state = 'close'
+        self.ori = list(cfg['probe_ori'])
         fx, fy = self.FINGER
         gx, gy = np.meshgrid(np.linspace(-fx / 2, fx / 2, 7), np.linspace(-fy / 2, fy / 2, 11))
         self._fp = np.stack([gx.ravel(), gy.ravel()], axis=1)
@@ -381,9 +416,41 @@ class SimIO:
     def pose(self):
         return [self.xy[0], self.xy[1], self.z] + list(self.cfg['probe_ori'])
 
+    FINGER_T = 9.0        # 손가락 하나 두께 (벌어지는 방향) [mm]
+    FINGER_W = 16.0       # 손가락 폭 [mm]
+    SQUEEZE_NOISE = (0.2, 0.3)   # 끼워 정렬 뒤 남는 오차 (mm, deg)
+    FINGER_TOL = 1.0      # 벌린 손가락이 무른 큐브 모서리를 이만큼은 눌러도 걸리지 않고 내려간다고 봄 [mm]
+
+    def _open_dir(self):
+        """그리퍼가 벌어지는 방향 (베이스 각도, rad). grasp_c 의 반대."""
+        return math.radians(self.cfg['probe_ori'][2] - self.ori[2])
+
+    def _fingers_hit(self, x, y):
+        """벌린 손가락(열기 폭)이 (x, y) 에서 내려갈 때 큐브에 걸리나."""
+        cx, cy, deg, h = self.cube
+        phi = self._open_dir()
+        d = np.array([math.cos(phi), math.sin(phi)])
+        n = np.array([-d[1], d[0]])
+        gx, gy = np.meshgrid(np.linspace(-self.FINGER_T / 2, self.FINGER_T / 2, 5),
+                             np.linspace(-self.FINGER_W / 2, self.FINGER_W / 2, 9))
+        loc = gx.ravel()[:, None] * d + gy.ravel()[:, None] * n
+        off = self.cfg['grip_open_width'] / 2 + self.FINGER_T / 2
+        for sg in (1, -1):
+            pts = loc + np.array([x, y]) + sg * off * d
+            if (rect_sdf(pts, cx, cy, math.radians(deg), self.cfg['cube']['long'] / 2,
+                         self.cfg['cube']['short'] / 2) < -self.FINGER_TOL).any():
+                return True
+        return False
+
     def movel(self, p6, vel, acc=None, what=''):
         d = math.dist(self.pose()[:3], p6[:3])
         self.t_sim += d / vel + 0.3
+        if len(p6) >= 6:
+            self.ori = list(p6[3:6])
+        top = self.cfg['z_floor'] + self.cube[3]
+        if (self.grip_state == 'open' and not self.held and p6[2] < top - 0.5
+                and self._fingers_hit(p6[0], p6[1])):
+            raise SearchError(f'시뮬: 벌린 손가락이 큐브에 걸림 ({p6[0]:.1f}, {p6[1]:.1f}) — 위치/각도 오차가 여유보다 큼')
         self.xy, self.z = (p6[0], p6[1]), p6[2]
 
     def sleep(self, s):
@@ -448,10 +515,22 @@ class SimIO:
 
     def gripper(self, what):
         self.t_sim += 1.0
+        top = self.cfg['z_floor'] + self.cube[3]
         if what == 'grip':
             self.held = True
         if what == 'open':
             self.held = False
+        if what == 'close' and self.grip_state == 'open' and self.z < top - 0.5 and not self.held:
+            # 끼워 정렬: 큐브가 손가락 사이 가운데로 밀리고, 넓은 면이 손가락과 나란해진다
+            cx, cy, deg, h = self.cube
+            phi = self._open_dir()
+            d = np.array([math.cos(phi), math.sin(phi)])
+            p = np.array([cx, cy]) - np.array(self.xy)
+            ctr = np.array(self.xy) + (p - (p @ d) * d) + random.gauss(0, self.SQUEEZE_NOISE[0]) * d
+            new_deg = (math.degrees(phi) + 90.0 + random.gauss(0, self.SQUEEZE_NOISE[1])) % 180.0
+            self.cube = (float(ctr[0]), float(ctr[1]), new_deg, h)
+            self.log(f'[시뮬] 끼워 정렬 → 실제 큐브 ({ctr[0]:.2f}, {ctr[1]:.2f}), {new_deg:.1f}°')
+        self.grip_state = what
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -474,9 +553,26 @@ class Job:
         t0 = time.monotonic()
         self.io.gripper('close')
         self.lift_travel()
-        s = CubeSearcher(self.io, self.cfg, self.log)
+        method = self.cfg.get('search_method', 'hybrid')
+        names = {'bayes': '확률 탐색 (bayes)', 'grid': '변별 이분 탐색 (grid)',
+                 'squeeze': '대략 확률 탐색 → 짧은 변 끼워 정렬 → 긴 축 위치 재기 (squeeze)',
+                 'hybrid': '대략 확률 탐색 → 변에 수직 이분 탐색으로 마무리 (hybrid)'}
+        self.log(f'탐지 방법: {names.get(method, method)}')
+        if method == 'squeeze':
+            # 끼워 정렬할 수 있을 만큼만 대략 찾는다 (짧은 변 쪽 여유가 한쪽 12 mm 이상)
+            cfg_s = dict(self.cfg, bayes_pos_std=self.cfg['squeeze_pos_std'], bayes_ang_std=self.cfg['squeeze_ang_std'])
+            s = BayesSearcher(self.io, cfg_s, self.log)
+        elif method == 'hybrid':
+            c = self.cfg
+            cfg_h = dict(c, bayes_pos_std=c['hybrid_pos_std'], bayes_ang_std=c['hybrid_ang_std'],
+                         bayes_top_after=-1.0, refine_repeat_deg=c['hybrid_repeat_deg'])
+            s = HybridSearcher(self.io, cfg_h, self.log)
+        else:
+            s = (BayesSearcher if method == 'bayes' else CubeSearcher)(self.io, self.cfg, self.log)
         try:
             res = s.run()
+            if method == 'squeeze':
+                res = self.squeeze_align(s, res)
         finally:
             self.lift_travel()
             self.save_log(s, locals().get('res'))
@@ -491,6 +587,85 @@ class Job:
             self.log(f'⚠ {w}')
         self.log('=' * 60)
         return res
+
+    def squeeze_short(self, cx, cy, th, z_top, extra=0.0):
+        """(cx, cy) 에서 손가락을 짧은 변(41) 방향으로 벌려 내려가 약하게 닫았다 연다 (WebLogic 닫기 0 mm, 5 N).
+        큐브가 손가락 사이 가운데로 밀리고 넓은 면이 손가락과 나란해진다 (센서 없이 맞추기, Goldberg 1993).
+        끝나면 큐브 짧은 축 방향 중심은 (cx, cy) 를 지나는 긴 축 방향 선 위, 긴 축은 th. 손가락은 열린 채 위에 있다."""
+        c = self.cfg
+        cs = grasp_c(th, 'short', c['probe_ori'][2], c['probe_ori'][2])
+        ori = [c['probe_ori'][0], c['probe_ori'][1], cs]
+        # extra: 바닥 여유(floor_clear) 아래로 더 내려간다. 벌린 RG2 손가락 끝은 닫힌 끝보다 높아서 (바닥은 닫고 잼) 여유가 있다
+        z_sq = max(z_top - c['grasp_depth'], c['z_floor'] + c['floor_clear']) - extra
+        self.log(f'  끼워 정렬: 중심 ({cx:.1f}, {cy:.1f}), 긴 축 {th:.1f}°, C = {cs:.2f}, z {z_sq:.2f}')
+        self.io.movel([cx, cy, c['z_travel']] + ori, c['vel_move'], what='정렬 위치 위로')
+        self.io.gripper('open')
+        self.io.sleep(c['grip_wait'])
+        self.io.movel([cx, cy, z_top + c['hover'] + 5] + ori, c['vel_move'], what='정렬 접근')
+        self.descend_guarded([cx, cy, z_sq] + ori)
+        self.io.gripper('close')                      # WebLogic 닫기 (0 mm, 5 N): 큐브를 살짝 끼워 민다
+        self.io.sleep(c['squeeze_wait'])
+        self.io.gripper('open')
+        self.io.sleep(c['grip_wait'])
+        self.io.movel([cx, cy, z_top + c['hover'] + 5] + ori, c['vel_slow'], what='정렬 후 상승')
+
+    def squeeze_align(self, s, res):
+        """대략 찾은 큐브를 짧은 변(41 mm) 쪽에서 닫기(5 N)로 끼워 가운데·각도를 기계적으로 맞추고, 긴 축 위치만 다시 잰다.
+
+        평행한 두 손가락이 닫히면 큐브가 손가락 사이 가운데로 밀리고 넓은 면이 손가락과 나란하게 돈다
+        (센서 없이 맞추기, Goldberg 1993). 그 뒤 남는 모르는 값은 긴 축 방향 위치 하나뿐이라 양쪽 짧은 변을 이분 탐색한다.
+        """
+        c = self.cfg
+        a, b = c['cube']['long'] / 2, c['cube']['short'] / 2
+        std = res.get('std', {})
+        e_pos = 3 * max(std.get('cx', 0.0), std.get('cy', 0.0))
+        e_ang = math.radians(3 * std.get('theta_deg', 0.0))
+        half = b * math.cos(e_ang) + a * math.sin(e_ang) + e_pos      # 손가락 사이에서 큐브가 차지할 수 있는 반폭 (최악)
+        if half > c['grip_open_width'] / 2 - 1.0:
+            raise SearchError(f'끼워 정렬하기엔 위치가 덜 좁혀졌습니다 (최악 반폭 {half:.1f} mm > 열기 반폭 '
+                              f'{c["grip_open_width"] / 2 - 1.0:.1f} mm). squeeze_pos_std/ang_std 를 줄이세요.')
+        th = res['theta']
+        cx, cy, z_top = res['cx'], res['cy'], res['z_top']
+        self.log(f'[3단계-1] 짧은 변 끼워 정렬 (손가락 여유 한쪽 최소 {c["grip_open_width"] / 2 - half:.1f} mm)')
+        self.squeeze_short(cx, cy, th, z_top)
+        self.io.gripper('close')                      # 다시 닫은 손가락 끝으로 누른다
+        self.io.sleep(c['grip_wait'])
+        # 이제 큐브의 짧은 축 방향 중심 = 그리퍼 중심 선, 긴 축 = th. 긴 축 방향 위치만 양쪽 짧은 변으로 잰다
+        u = np.array([math.cos(math.radians(th)), math.sin(math.radians(th))])
+        o = np.array([cx, cy])
+        exp_u = a + res['fp_long']
+        w = c['edge_window']
+        self.log(f'[3단계-2] 긴 축 위치: 양쪽 짧은 변 이분 탐색 (허용 {c["edge_tol"]} mm)')
+        n0 = len([t for t in s.touches if t['kind'] != 'outside'])
+        z = s.measure_top(cx, cy)
+        if z is not None:
+            s.z_top = z
+        sp, cl_p = s.find_edge(o, u, max(0.0, exp_u - w), exp_u + w, c['edge_tol'])[0::2]
+        sm, cl_m = s.find_edge(o, -u, max(0.0, exp_u - w), exp_u + w, c['edge_tol'])[0::2]
+        warn = list(res['warnings'])
+        if cl_p and cl_m:
+            raise SearchError('긴 축 양쪽 짧은 변이 모두 영역 경계에 잘렸습니다.')
+        if cl_p or cl_m:
+            shift = (-(sm - exp_u)) if cl_p else (sp - exp_u)
+            warn.append('긴 축 한쪽 변이 영역 경계에 잘림: 그 방향은 손가락 끝 폭 추정값으로 계산')
+        else:
+            shift = (sp - sm) / 2
+        ctr = o + shift * u
+        span = sp + sm
+        n1 = len([t for t in s.touches if t['kind'] != 'outside'])
+        self.log(f'  긴 축 방향 {shift:+.2f} mm 이동 → 중심 ({ctr[0]:.2f}, {ctr[1]:.2f}), 잰 긴 폭 {span:.1f} mm '
+                 f'(터치 {n1 - n0}번)')
+        if not cl_p and not cl_m and abs(span - (2 * a + 2 * res['fp_long'])) > c['size_tol_mm'] * 2:
+            warn.append(f'정렬 뒤 잰 긴 폭 {span:.1f} mm 가 예상 {2 * a + 2 * res["fp_long"]:.1f} mm 와 다름 '
+                        '(정렬 중 큐브가 돌았거나 밀렸을 수 있음)')
+        z = s.measure_top(float(ctr[0]), float(ctr[1]))
+        out = dict(res)
+        out.update(cx=float(ctr[0]), cy=float(ctr[1]), z_top=z if z is not None else s.z_top,
+                   span_long=span, fp_long=span / 2 - a, method='squeeze', squeezed_at=[cx, cy, th],
+                   touches=len([t for t in s.touches if t['kind'] != 'outside']), warnings=warn)
+        out['height'] = out['z_top'] - c['z_floor']
+        out['edges2'] = list(res['edges2']) + [(o + sp * u).tolist(), (o - sm * u).tolist()]
+        return out
 
     def tray_status(self):
         """칸마다 위에서 터치해서 큐브가 있는지 본다. 반환 {칸: True(있음)/False(비었음)}."""
@@ -513,11 +688,17 @@ class Job:
         self.lift_travel()
         return out
 
-    def pick_place(self):
+    def pick_place(self, res=None, cell=None):
+        """탐지 → 잡기 → 트레이 빈칸. res 를 주면 다시 탐지하지 않고 그 결과로 잡고, cell 을 주면 그 칸에 넣는다."""
         c = self.cfg
         if not self.tray:
             raise SearchError(f'트레이 좌표가 없습니다: {c["tray_file"]}')
-        if c['tray_check']:
+        if cell is not None:
+            if cell not in self.tray:
+                raise SearchError(f'트레이 {cell}번 좌표가 없습니다.')
+            self.log(f'트레이 {cell}번에 넣습니다 (빈칸 확인 안 함 — 비어 있어야 합니다)')
+            empty = [cell]
+        elif c['tray_check']:
             self.log('[0단계] 트레이 빈칸 확인')
             st = self.tray_status()
             empty = [n for n in c['tray_order'] if st.get(n) is False]
@@ -527,7 +708,8 @@ class Job:
             raise SearchError('트레이에 빈칸이 없습니다.')
         n = empty[0]
         t = self.tray[n]
-        res = self.search()
+        if res is None:
+            res = self.search()
         side = c['cube']['long'] if c['grasp_side'] == 'long' else c['cube']['short']
         if c['grip_open_width'] < side + 4.0:
             # 묻지 않고 알리기만 한다: 손가락이 걸리면 잡으러 내려갈 때 힘(grasp_f_limit)으로 멈추고 중단한다
@@ -543,6 +725,11 @@ class Job:
             if ans.strip().lower() != 'y':
                 self.log('  잡지 않고 끝냅니다.')
                 return res
+        if c['pre_align'] and c['grasp_side'] == 'long':
+            # 잡기(64 변)는 손가락 닫히는 방향만 가운데로 맞춘다 → 그 전에 짧은 변(41)으로 끼워
+            # 나머지 방향 위치와 각도를 그리퍼에 맞춰 둔다. 그러면 탐지 오차와 상관없이 트레이에 늘 같은 자리로 놓인다.
+            self.log('[4단계-0] 잡기 전 짧은 변 끼워 정렬 (41 mm 방향 위치·각도를 그리퍼에 맞춤)')
+            self.squeeze_short(res['cx'], res['cy'], res['theta'], res['z_top'], c['pre_align_extra'])
         c_tray = t['top'][5]
         cg = grasp_c(res['theta'], c['grasp_side'], c['probe_ori'][2], c_tray)
         z_grasp = max(res['z_top'] - c['grasp_depth'], c['z_floor'] + c['floor_clear'])
@@ -562,12 +749,14 @@ class Job:
         # 마지막 하강은 힘을 보면서: 손가락이 큐브 윗면에 걸리면 멈춘다
         self.descend_guarded([res['cx'], res['cy'], z_grasp] + ori)
         self.io.gripper('grip')
+        self.io.sleep(c['grip_wait'])                # DO 신호라 명령은 바로 끝난다 → 손가락이 다 닫힐 때까지 기다린 뒤 든다
         self.io.movel([res['cx'], res['cy'], zt] + ori, c['vel_slow'], what='들어 올리기')
         self.io.movel([t['top'][0], t['top'][1], zt] + t['top'][3:], c['vel_move'], what=f'트레이 {n}번 위로')
         self.io.movel(t['top'], c['vel_move'], what=f'트레이 {n}번 접근')
         self.io.movel(t['top'][:2] + [z_place] + t['top'][3:], c['vel_slow'], what='내려놓기')
         self.io.sleep(c['settle'])
         self.io.gripper('open')
+        self.io.sleep(c['grip_wait'])
         self.io.movel(t['top'], c['vel_slow'], what='상승')
         self.log(f'완료: 큐브를 트레이 {n}번 칸에 넣었습니다.')
         return res
@@ -744,7 +933,7 @@ def show_cfg(cfg):
 
 def menu(job, cfg, log):
     help_txt = ('s: 탐지만 | g: 탐지→잡기→트레이 빈칸 | t: 트레이 빈칸 확인 | f: 영역 바닥 재기 | '
-                'tf: 트레이 바닥 재기 | p: 마지막 탐지 결과로 잡았다 놓기 | c: 설정 | q: 종료')
+                'tf: 트레이 바닥 재기 | p: 마지막 탐지 결과로 잡았다 놓기 | gl: 마지막 탐지 결과로 잡아 트레이 n번에 | c: 설정 | q: 종료')
     show_cfg(cfg)
     print(help_txt)
     while True:
@@ -758,6 +947,11 @@ def menu(job, cfg, log):
                 job.pick_test()
             elif sel == 'g':
                 job.pick_place()
+            elif sel == 'gl':
+                res, name = job.last_result()
+                log(f'기록 {name}: 중심 ({res["cx"]:.2f}, {res["cy"]:.2f}), 긴 축 {res["theta"]:.1f}°, 윗면 z {res["z_top"]:.2f}')
+                n = int(input('  넣을 트레이 칸 번호: ').strip())
+                job.pick_place(res=res, cell=n)
             elif sel == 't':
                 job.tray_status()
             elif sel == 'f':
@@ -789,12 +983,15 @@ def main(args=None):
     argv = sys.argv[1:]
     sim = '--sim' in argv
     cfg = load_cfg()
+    for m in ('grid', 'bayes', 'squeeze', 'hybrid'):    # 이번 실행만 탐지 방법 바꾸기 (설정 파일은 그대로)
+        if f'--{m}' in argv:
+            cfg['search_method'] = m
 
     def log(msg):
         print(f'{time.strftime("%H:%M:%S")} {msg}', flush=True)
 
     if sim:
-        rest = [a for a in argv if a not in ('--sim', '--place') and not a.startswith('--ros-args')]
+        rest = [a for a in argv if a not in ('--sim', '--place', '--grid', '--bayes', '--squeeze', '--hybrid') and not a.startswith('--ros-args')]
         if cfg['area']['x_min'] is None:
             cfg['area'] = dict(SIM_AREA)
         if cfg['z_floor'] is None:
@@ -819,6 +1016,7 @@ def main(args=None):
         except SearchError as e:
             log(f'실패: {e}')
             sys.exit(1)
+        cx, cy, deg = io.cube[:3]                  # 끼워 정렬하면 큐브가 움직였으므로 지금(잡기 직전) 위치와 비교
         derr = math.dist((res['cx'], res['cy']), (cx, cy))
         aerr = ((res['theta'] - deg + 90) % 180) - 90
         log(f'[시뮬] 오차: 중심 {derr:.2f} mm, 각도 {aerr:+.2f}°, 터치 {io.n_probe}번, 예상 시간 {io.t_sim / 60:.1f} 분')
