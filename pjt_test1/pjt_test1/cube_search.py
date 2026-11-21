@@ -470,6 +470,8 @@ class SimIO:
     def probe(self, x, y, z_from, z_to, vel, ori, f_limit=None, f_min=None):
         c = self.cfg
         self.n_probe += 1
+        if getattr(self, 'delay', 0):
+            time.sleep(self.delay)                 # --hmi: 화면에서 따라갈 수 있게
         self.movel([x, y, z_from] + list(ori), c['vel_move'])
         frac, top = self._surface(x, y)
         floor = c['z_floor']
@@ -536,9 +538,24 @@ class SimIO:
 # ══════════════════════════════════════════════════════════════════════
 # 작업
 # ══════════════════════════════════════════════════════════════════════
+class LivePub:
+    """탐지 상태를 HMI(pjt_test1 cube_hmi) 로 보낸다: /cube_search/live (std_msgs/String, JSON)."""
+    TOPIC = '/cube_search/live'
+
+    def __init__(self, node):
+        from std_msgs.msg import String
+        self.String = String
+        self.pub = node.create_publisher(String, self.TOPIC, 100)
+
+    def __call__(self, kind, d):
+        d = dict(d, type=kind)
+        self.pub.publish(self.String(data=json.dumps(d, ensure_ascii=False, default=float)))
+
+
 class Job:
-    def __init__(self, io, cfg, log, log_dir=LOG_DIR):
+    def __init__(self, io, cfg, log, log_dir=LOG_DIR, live=None):
         self.io, self.cfg, self.log, self.log_dir = io, cfg, log, log_dir
+        self.live = live                       # HMI 실시간 표시 (LivePub) 또는 None
         self.tray = load_tray(cfg)
 
     def lift_travel(self):
@@ -558,21 +575,34 @@ class Job:
                  'squeeze': '대략 확률 탐색 → 짧은 변 끼워 정렬 → 긴 축 위치 재기 (squeeze)',
                  'hybrid': '대략 확률 탐색 → 변에 수직 이분 탐색으로 마무리 (hybrid)'}
         self.log(f'탐지 방법: {names.get(method, method)}')
+        if self.live is None:
+            log = self.log
+        else:
+            self.live('start', {'area': self.cfg['area'], 'cube': self.cfg['cube'], 'method': names.get(method, method)})
+
+            def log(m, _log=self.log, _live=self.live):     # 단계([..]) 와 로그 줄도 HMI 로
+                _log(m)
+                _live('stage' if m.lstrip().startswith('[') else 'log', {'text': m.strip()})
         if method == 'squeeze':
             # 끼워 정렬할 수 있을 만큼만 대략 찾는다 (짧은 변 쪽 여유가 한쪽 12 mm 이상)
             cfg_s = dict(self.cfg, bayes_pos_std=self.cfg['squeeze_pos_std'], bayes_ang_std=self.cfg['squeeze_ang_std'])
-            s = BayesSearcher(self.io, cfg_s, self.log)
+            s = BayesSearcher(self.io, cfg_s, log)
         elif method == 'hybrid':
             c = self.cfg
             cfg_h = dict(c, bayes_pos_std=c['hybrid_pos_std'], bayes_ang_std=c['hybrid_ang_std'],
                          bayes_top_after=-1.0, refine_repeat_deg=c['hybrid_repeat_deg'])
-            s = HybridSearcher(self.io, cfg_h, self.log)
+            s = HybridSearcher(self.io, cfg_h, log)
         else:
-            s = (BayesSearcher if method == 'bayes' else CubeSearcher)(self.io, self.cfg, self.log)
+            s = (BayesSearcher if method == 'bayes' else CubeSearcher)(self.io, self.cfg, log)
+        s.live = self.live
         try:
             res = s.run()
             if method == 'squeeze':
                 res = self.squeeze_align(s, res)
+        except SearchError as e:
+            if self.live is not None:
+                self.live('fail', {'text': str(e)})
+            raise
         finally:
             self.lift_travel()
             self.save_log(s, locals().get('res'))
@@ -586,6 +616,9 @@ class Job:
         for w in res['warnings']:
             self.log(f'⚠ {w}')
         self.log('=' * 60)
+        if self.live is not None:
+            self.live('result', {'cx': res['cx'], 'cy': res['cy'], 'th': res['theta'], 'z_top': res['z_top'],
+                                 'touches': res['touches'], 'elapsed': res['elapsed'], 'warnings': res['warnings']})
         return res
 
     def squeeze_short(self, cx, cy, th, z_top, extra=0.0):
@@ -991,7 +1024,7 @@ def main(args=None):
         print(f'{time.strftime("%H:%M:%S")} {msg}', flush=True)
 
     if sim:
-        rest = [a for a in argv if a not in ('--sim', '--place', '--grid', '--bayes', '--squeeze', '--hybrid') and not a.startswith('--ros-args')]
+        rest = [a for a in argv if a not in ('--sim', '--place', '--hmi', '--grid', '--bayes', '--squeeze', '--hybrid') and not a.startswith('--ros-args')]
         if cfg['area']['x_min'] is None:
             cfg['area'] = dict(SIM_AREA)
         if cfg['z_floor'] is None:
@@ -1010,7 +1043,16 @@ def main(args=None):
         cube = (cx, cy, deg, 30.0)
         log(f'[시뮬] 실제 큐브: 중심 ({cx:.2f}, {cy:.2f}), 긴 축 {deg:.1f}°, 높이 30')
         io = SimIO(cfg, log, cube)
-        job = Job(io, cfg, log, log_dir=os.path.join(LOG_DIR, 'sim'))
+        live = None
+        if '--hmi' in argv:
+            # HMI 로 보며 확인: ROS 토픽으로 보내고, 터치마다 조금 쉬어서 화면에서 따라갈 수 있게
+            import rclpy
+            rclpy.init()
+            live_node = rclpy.create_node('pjt_cube_search_sim')
+            live = LivePub(live_node)
+            io.delay = float(os.environ.get('CUBE_SIM_DELAY', '0.3'))
+            time.sleep(1.0)                        # 구독자와 연결될 시간
+        job = Job(io, cfg, log, log_dir=os.path.join(LOG_DIR, 'sim'), live=live)
         try:
             res = job.pick_place() if '--place' in argv else job.search()
         except SearchError as e:
@@ -1034,7 +1076,7 @@ def main(args=None):
     try:
         io = RobotIO(node, cfg, log)
         io.prepare()
-        menu(Job(io, cfg, log), cfg, log)
+        menu(Job(io, cfg, log, live=LivePub(node)), cfg, log)
     except SearchError as e:
         log(f'오류: {e}')
     except (KeyboardInterrupt, EOFError):

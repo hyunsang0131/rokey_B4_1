@@ -145,6 +145,17 @@ class CubeSearcher:
     def __init__(self, io, cfg, log):
         self.io, self.cfg, self.log = io, cfg, log
         self.touches = []           # (x, y, 결과) 기록 (그림, 로그용)
+        self.live = None            # 실시간 표시 콜백 live(kind, dict) (HMI). 없으면 안 보냄
+
+    def emit(self, kind, **d):
+        if self.live is not None:
+            try:
+                self.live(kind, d)
+            except Exception:       # 표시 실패가 탐지를 멈추면 안 된다
+                pass
+
+    def n_touch(self):
+        return sum(1 for t in self.touches if t['kind'] != 'outside')
 
     # ── 기본 동작 ─────────────────────────────────────────────────────
     def in_area(self, x, y, margin=0.0):
@@ -155,6 +166,7 @@ class CubeSearcher:
     def _probe(self, x, y, z_from, z_to, vel, kind):
         r = self.io.probe(x, y, z_from, z_to, vel, self.cfg['probe_ori'])
         self.touches.append({'x': x, 'y': y, 'kind': kind, 'z': r['z'], 'f': r['f']})
+        self.emit('touch', x=x, y=y, hit=r['z'] is not None, n=self.n_touch())
         if r['hard']:
             raise SearchError(f'({x:.1f}, {y:.1f}) 에서 딱딱한 물체에 걸렸습니다 (힘 한계). '
                               '영역 안에 큐브 말고 높은 물체가 없는지, z_floor 설정을 확인하세요.')
@@ -168,6 +180,7 @@ class CubeSearcher:
         """
         if not self.in_area(x, y, self.cfg['edge_margin']):
             self.touches.append({'x': x, 'y': y, 'kind': 'outside', 'z': None, 'f': 0.0})
+            self.emit('touch', x=x, y=y, hit=None, n=self.n_touch())
             return False
         c = self.cfg
         r = self._probe(x, y, self.z_top + c['hover'], self.z_top - c['press_depth'], c['vel_press'], 'press')

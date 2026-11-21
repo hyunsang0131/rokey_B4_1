@@ -142,6 +142,17 @@ class BayesSearcher(CubeSearcher):
         w = np.exp(self.logw - self.logw.max())
         return w / w.sum()
 
+    def _emit_est(self, st):
+        """HMI 실시간 표시: 현재 추정 + 후보(파티클) 150개 (가중치대로 뽑음, 탐지용 난수와 따로)."""
+        if self.live is None:
+            return
+        if not hasattr(self, '_live_rng'):
+            self._live_rng = np.random.default_rng(0)
+        idx = self._live_rng.choice(len(self.X), size=min(150, len(self.X)), p=self._w())
+        pts = [[round(float(self.X[i, 0]), 1), round(float(self.X[i, 1]), 1)] for i in idx]
+        self.emit('estimate', cx=float(st['cx']), cy=float(st['cy']), th=math.degrees(st['th']),
+                  sp=float(max(st['sx'], st['sy'])), sa=float(st['sth']), pts=pts)
+
     def _stats(self):
         w, X = self._w(), self.X
         mx, my = w @ X[:, 0], w @ X[:, 1]
@@ -265,6 +276,7 @@ class BayesSearcher(CubeSearcher):
             if self._ess() < c['bayes_ess_frac'] * len(self.X):
                 self._resample_move()
             st = self._stats()
+            self._emit_est(st)
             self.log(f'  {n_press:2d}: ({p[0]:.1f}, {p[1]:.1f}) {"있음" if hit else "없음"} '
                      f'(이득 {ig:.2f} bit) → 중심 ({st["cx"]:.1f}, {st["cy"]:.1f}) ±{max(st["sx"], st["sy"]):.2f} mm, '
                      f'각도 {math.degrees(st["th"]):.1f} ±{st["sth"]:.2f}°')
