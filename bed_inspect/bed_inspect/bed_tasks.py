@@ -311,6 +311,7 @@ class BedTasks:
         if p.get('close_taught'):                       # 교시 방식: 원호 2 거꾸로 → 원호 1 거꾸로
             f0 = self._arc(p['arc2_mid'], p['via'], '커버 닫기 원호 2')
             self._arc(p['close_mid'], p['close_end'], '커버 닫기 원호 1', f0)
+            self._press_before_release()
             r.grip('cover_open')
             r.movel_to(p['above'], cfg.COVER_APP_VEL, cfg.COVER_APP_ACC, '커버 고리에서 수직 상승')
             self.home()
@@ -319,6 +320,7 @@ class BedTasks:
             if self._loose_ok():
                 r.grip('cover_grip')
             self._arc(p['close_mid'], p['close_end'], '커버 닫기 원호')
+            self._press_before_release()
             r.grip('cover_open')
             r.movel_to(p['above'], cfg.COVER_APP_VEL, cfg.COVER_APP_ACC, '커버 고리에서 수직 상승')
             self.home()
@@ -330,9 +332,28 @@ class BedTasks:
         if self._loose_ok():
             r.grip('cover_grip')                        # 원호에서는 뚜껑 무게가 고리에 걸리므로 다시 꽉 잡는다
         self._arc(p['mid'], p['close_end'], '커버 닫기 원호', f0)
+        self._press_before_release()
         r.grip('cover_open')                            # 닫히기 2도 전에 놓는다 → 뚜껑이 제 무게로 살짝 내려앉는다
         r.movel_to(p['above'], cfg.COVER_APP_VEL, cfg.COVER_APP_ACC, '커버 고리에서 수직 상승')
         self.home()
+
+    def _press_before_release(self):
+        """11-22 형님: 뚜껑을 다 닫고 고리를 놓기 전에 z 로 COVER_CLOSE_PRESS_DZ(5mm) 만 천천히 내려 눌러 준다
+        (꼬이거나 집힌 것이 있어도 제자리에 앉게). 0 이면 안 함."""
+        dz = cfg.COVER_CLOSE_PRESS_DZ
+        if dz > 0:
+            # 11-22 실물: 위치로 단단하게 5mm 누르다 공정이 여기서 멈춤 → z 만 부드럽게(1N/mm) 해서 많아야 약 5N 으로 누른다
+            self.log(f'커버 다 닫음 → 놓기 전에 {dz:g}mm 살짝 내려 누르기 (순응 제어, 약 {dz * cfg.COVER_PRESS_KZ / 1000:.0f}N)')
+            dr = self.r.dr
+            on = dr.task_compliance_ctrl([3000.0, 3000.0, cfg.COVER_PRESS_KZ, 300.0, 300.0, 300.0]) == 0
+            try:
+                if on:
+                    self.r.sleep(cfg.COVER_COMPLIANCE_SETTLE)
+                self.r.move_z(-dz, vel=cfg.VELX_SLOW, acc=cfg.ACCX_SLOW)
+                self.r.sleep(0.3)
+            finally:
+                if on:
+                    dr.release_compliance_ctrl()
 
     @staticmethod
     def _loose_ok():
@@ -384,34 +405,43 @@ class BedTasks:
         # 블록이 기준 높이보다 높으면 그만큼 덜 내려가야 같은 깊이로 잡힌다
         extra = h - cfg.H_REF
 
-        point, dz = self._station(mv['src'])
-        r.grip('block_open')
-        r.movej_to(point)
-        if point.get('down'):               # 팀원 교시 파일: 잡는 자리(_down)와 올라올 자리(_up)를 직접 씀
-            self._go_down(point, extra)
-            r.grip('block_grip')
-            self._go_up(point)
+        # mv['_held']: 블록을 잡은 뒤 True, 놓은 뒤 False. 충돌 복구(홈) 후 다시 부르면 들고 있는 블록을 놓기부터 한다
+        if not mv.get('_held'):
+            point, dz = self._station(mv['src'])
+            r.grip('block_open')
+            r.movej_to(point)
+            if point.get('down'):               # 팀원 교시 파일: 잡는 자리(_down)와 올라올 자리(_up)를 직접 씀
+                self._go_down(point, extra)
+                r.grip('block_grip')
+                mv['_held'] = True
+                self._go_up(point)
+            else:
+                down = dz + extra
+                r.move_z(down, cfg.VELX_SLOW, cfg.ACCX_SLOW)
+                r.grip('block_grip')
+                mv['_held'] = True
+                r.move_z(-down)
         else:
-            down = dz + extra
-            r.move_z(down, cfg.VELX_SLOW, cfg.ACCX_SLOW)
-            r.grip('block_grip')
-            r.move_z(-down)
+            self.log('충돌 복구 뒤: 들고 있는 블록을 놓으러 갑니다 (잡기 건너뜀)')
 
         point, dz = self._station(mv['dst'])
         r.movej_to(point)
         if dz is None:                      # 버리는 통: 위에서 그냥 놓는다
             r.grip('block_open')
+            mv['_held'] = False
             return
         if point.get('down'):
             self._go_down(point, extra + cfg.PLACE_CLEAR_TEACH)
             r.sleep(cfg.PLACE_SETTLE)
             r.grip('block_open')
+            mv['_held'] = False
             self._go_up(point)
             return
         down = dz + extra + cfg.PLACE_CLEAR
         r.move_z(down, cfg.VELX_SLOW, cfg.ACCX_SLOW)
         r.sleep(cfg.PLACE_SETTLE)           # 매달린 블록이 흔들리는 채로 놓으면 칸 안에서 틀어진다
         r.grip('block_open')
+        mv['_held'] = False
         r.move_z(-down)
 
     def _go_down(self, point, dz_extra):

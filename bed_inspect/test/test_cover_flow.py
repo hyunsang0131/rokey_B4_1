@@ -13,6 +13,14 @@ import pytest
 from bed_inspect import bed_config as cfg
 
 
+@pytest.fixture(autouse=True)
+def _no_close_press(monkeypatch):
+    """동작 순서 비교 시험은 닫고 놓기 전 누르기(11-22 추가)를 끄고 본다 (그건 따로 시험)."""
+    from bed_inspect import bed_config as _cfg
+    monkeypatch.setattr(_cfg, 'COVER_CLOSE_PRESS_DZ', 0.0)
+
+
+
 class _Obj:
     def __init__(self, **kw):
         self.__dict__.update(kw)

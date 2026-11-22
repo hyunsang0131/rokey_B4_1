@@ -18,27 +18,30 @@ SLOT_NAMES = [f'Slot {i}' for i in range(1, 7)]
 
 
 def validate_order_config(data):
-    """Validate the JSON shape emitted by bed_ordering.html."""
+    """Validate and normalize the JSON order emitted by bed_ordering.html."""
     if not isinstance(data, dict):
         raise ValueError('요청 본문은 JSON 객체여야 합니다')
     order_id = data.get('order_id')
     slots = data.get('slots')
     if not isinstance(order_id, str) or not order_id or len(order_id) > 64:
         raise ValueError('order_id가 없거나 형식이 올바르지 않습니다')
-    if not isinstance(slots, dict) or set(slots) != set(SLOT_NAMES):
-        raise ValueError('slots에는 Slot 1부터 Slot 6까지 필요합니다')
-    if any(
-            not isinstance(value, str) or value not in P.STIFFNESS_K
-            for value in slots.values()):
-        raise ValueError('각 슬롯 값은 부드러움 또는 단단함이어야 합니다')
+    slots = P.normalize_order_slots(slots)
     created_at = data.get('created_at')
     if created_at is not None and (
             not isinstance(created_at, str) or len(created_at) > 64):
         raise ValueError('created_at 형식이 올바르지 않습니다')
+    bed_model = data.get('bed_model', '모델 정보 없음')
+    size = data.get('size', '')
+    if not isinstance(bed_model, str) or len(bed_model) > 64:
+        raise ValueError('bed_model 형식이 올바르지 않습니다')
+    if not isinstance(size, str) or len(size) > 32:
+        raise ValueError('size 형식이 올바르지 않습니다')
     return {
         'order_id': order_id,
         'created_at': created_at,
-        'slots': {name: slots[name] for name in SLOT_NAMES},
+        'bed_model': bed_model,
+        'size': size,
+        'slots': slots,
     }
 
 

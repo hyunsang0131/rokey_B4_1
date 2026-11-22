@@ -76,6 +76,9 @@ GRIP_WIDTH = {                    # 손가락 사이 폭 [mm] ('service' 모드�
     'cover_open': 60, 'cover_grip': 0,   # 고리 잡기: 끝까지 닫기 (형님: 10mm 로는 덜 닫힘)
     'cover_loose': 20,            # 경유점 → 끝점 직선 동안 고리를 살며시 잡는 폭 (데모 방식). 고리 굵기보다 넓게
     'block_open': 70, 'block_grip': 35,     # 블록 폭보다 넓게 벌리고, 조금 좁게 잡는다
+    # 실 고정 나사 (string_v1/v2): 머리 지름 12.7mm (형님 11-21). 서비스 모드 40N 으로 10mm 까지 조이게 (머리에서 멈춤),
+    # 놓을 땐 머리보다 넉넉히 25mm 만 벌림. io(WebLogic DO1 = 5N)로는 돌릴 때 미끄러졌음
+    'screw_open': 25, 'screw_grip': 10,
 }
 GRIP_WAIT = 1.2                   # 그리퍼 명령 후 대기 [s]
 DO_CLOSE, DO_OPEN = 1, 2          # 'io' 모드: DO1=ON 닫힘, DO2=ON 열림
@@ -87,6 +90,9 @@ DO_BOTH_WIDTH = 66.0              # 위 WebLogic 프로그램의 너비 (시뮬�
 # ── 누르기 측정 ───────────────────────────────────────────────────────
 PRESS_APPROACH_DZ = -36.0         # 교시 높이에서 빠르게 내려오는 양 (-40 → -36, 2026-11-20 형님: 침대 z 154.37 → 118.37).
                                   # 키 큰 큐브(+9mm) 윗면에 빠르게 내려가다 부딪히지 않게. 트레이는 149.09 → 113.09
+ORDER_APPROACH_RAISE = 9.0        # 주문 모드만: 키 큰 큐브(29mm)가 있다고 보고 빠른 접근을 이만큼 덜 내려옴 (2026-11-20 형님)
+                                  # → 침대 z 127.37 / 트레이 122.09 에서 누르기 시작. 탐색 거리·깊이 한계도 같은 양 늘려 바닥 기준 한계는 그대로.
+                                  # 첫 불량 검사(자동 보수)·측정은 높은 큐브가 없으니 118.37 그대로.
 SEARCH_STEP = 1.0                 # 접촉 전 한 스텝 [mm]
 PRESS_STEP = 0.5                  # 접촉 후 한 스텝 [mm]
 STEP_VEL, STEP_ACC = 10, 40       # 스텝 이동 속도
@@ -221,6 +227,8 @@ COVER_MIN_OPEN_DEG = 90.0         # 끝점이 이보다 덜 열린 자리면 거
 COVER_CLOSE_MARGIN_DEG = 2.0      # 닫을 때 완전히 닫히기 이 각도 전에 놓는다 (반지름 190mm 에서 약 7mm 위).
                                   # 로봇이 뚜껑을 테두리에 눌러 박아 경첩을 비트는 것을 막는다
 COVER_MAX_AXIAL_OFFSET = 15.0     # 잡는 점 x 가 경첩 두 개의 가운데(데모 시작점 x)에서 벗어나도 되는 거리 [mm]
+COVER_CLOSE_PRESS_DZ = float(os.environ.get('BED_COVER_PRESS', '5') or 0)   # 닫고 놓기 전에 살짝 내려 누르기 [mm] (11-22 형님)
+COVER_PRESS_KZ = 1000.0           # 그 누르기 동안 z 강성 [N/m] (1N/mm → 5mm 면 약 5N)
 COVER_MAX_GRIP_ANGLE = 10.0       # 잡는 점이 닫힌 뚜껑 면에서 벗어나도 되는 각도 [deg] (고리 높이 오입력 방지)
 COVER_F_LIMIT = 20.0              # 뚜껑을 잡고 움직이는 동안 외력(시작 직후 값과의 차이, 크기)이 이걸 넘으면 즉시 정지 [N].
                                   # 한 번 돌려 로그의 "최대 외력"을 보고 그 값 + 10N 정도로 맞춘다
@@ -291,3 +299,27 @@ STEP_MEASURE, STEP_CHECK, STEP_OPEN, STEP_TAKE, STEP_PUT, STEP_CLOSE, STEP_REMEA
 if not COVER_ENABLED:
     for _n in (STEP_OPEN, STEP_CLOSE):
         STEP_NAMES[_n] += ' (생략)'
+
+
+# ── 예외 상황 (2026-11-20 형님) ───────────────────────────────────────
+# 1) 충돌: 사람이 치는 등으로 컨트롤러가 보호 정지(SAFE_STOP/SAFE_OFF) → 충돌 위치 저장 → 보호 정지 해제 →
+#    충돌 반대 방향(움직이던 방향의 반대)으로 COLLISION_BACKOFF 후퇴 → 홈 → 하던 작업(칸 누르기, 블록 옮기기,
+#    커버)을 처음부터 다시. HMI 에 "충돌로 인한 긴급 프로토콜". 충돌 감도는 펜던트(컨트롤러) 설정을 따른다.
+COLLISION_ENABLED = os.environ.get('BED_COLLISION', '1') != '0'
+COLLISION_BACKOFF = 30.0          # 충돌 반대 방향 후퇴 거리 [mm]
+COLLISION_RETRY_MAX = 3           # 같은 작업에서 충돌이 이만큼 넘게 나면 공정을 멈춘다
+COLLISION_BACKOFF_VEL, COLLISION_BACKOFF_ACC = 10, 30   # 후퇴는 천천히 [mm/s, mm/s²]
+COLLISION_STILL_TOL = 0.1         # 안정 판단: 이 시간 동안 위치 흔들림이 이 값 [mm] 이하
+COLLISION_STILL_HOLD = 1.0        # [s]
+COLLISION_STILL_TIMEOUT = 10.0    # 이 안에 안정되지 않으면 공정을 멈춘다 [s]
+COLLISION_LIFT = 30.0             # 뚜껑이 닫혀 있을 때: 후퇴 뒤 이만큼 위로 올라가서 홈 [mm]
+COLLISION_DETOUR_Y = -200.0       # 뚜껑이 열려 있고 로봇이 이 y 보다 뚜껑 쪽(-y)이면 교시한 우회 경로(E1 → E2)로 홈
+COLLISION_COVER_UP = 50.0         # 커버 작업 중 충돌: 후퇴 → 고리 놓기 → 이만큼 위로 → 홈 → 사람 확인 후 다시
+# 2) 재고 부족: 교체 트레이에 맞는 큐브가 모자라면 cube_search(pjt_test1)로 탐색 영역의 큐브를 찾아 트레이 빈칸에
+#    넣고, 트레이 맵을 다시 잰 뒤 계획부터 이어서. 탐색 영역에는 큐브 1개 (cube_search 설정 ~/ws_cobot_pjt/cube_search/config.json)
+RESTOCK_ENABLED = os.environ.get('BED_RESTOCK', '1') != '0'
+# 침대·트레이 큐브가 한 종류뿐이라 두 무리로 못 나눌 때 쓸 부드러움/단단함 경계 [N/mm] (침대 측정 기준).
+# 전에 두 종류로 나눈 적이 있으면 DATA_DIR/class_ref.json 저장값을 먼저 씀. 0 이면 안 씀 (11-22: 실물 딱딱 약 10~11)
+CLASS_THR_FALLBACK = float(os.environ.get('BED_CLASS_THR', '8.0') or 0)   # 11-22 형님: 부드러움 약 6, 딱딱 약 10~11 → 기하 평균 약 8
+STRING_RESTOCK = os.environ.get('BED_STRING', '1') != '0'   # 재고 부족 때 실 고정해제 → 블록 위치추정 → (공정 끝) 실 다시 고정 (11-22 형님). BED_STRING=0 끔
+RESTOCK_MAX = 3                   # 한 번 공정에서 cube_search 를 부르는 최대 횟수 (탐색 영역에 큐브를 다시 놓아 주는 경우)

@@ -32,6 +32,7 @@ import queue
 import statistics
 import sys
 import threading
+import os
 import time
 import traceback
 
@@ -64,8 +65,23 @@ class BedIO:
         self.pub_status = self.node.create_publisher(String, '/bed/status', STATUS_QOS)
         self.pub_log = self.node.create_publisher(String, '/bed/log', 50)
         self.pub_curve = self.node.create_publisher(String, '/bed/curve', 20)   # 누르기 한 번의 힘-변위 곡선 (화면 그래프용)
-        self.node.create_subscription(String, '/bed/cmd', self._on_cmd, 10)
+        self.node.create_subscription(String, '/bed/cmd', self._on_cmd, 10)   # 터미널 bed_cmd 용 (응답 없음)
+        # 서비스: HMI(cushion_bridge 경유)가 명령을 보내고 받았는지 응답을 받는다 (2026-11-20 형님)
+        self.last_state = 'starting'
+        try:
+            from bed_interfaces.srv import Command
+            self.node.create_service(Command, '/bed/command', self._on_cmd_srv)
+        except ImportError:                 # bed_interfaces 를 빌드/소스 안 한 터미널: 토픽만으로 동작
+            self.node.get_logger().warn('bed_interfaces 가 없어 명령 서비스(/bed/command) 없이 토픽만 씁니다. '
+                                        'source install/setup.bash 를 다시 하세요.')
         self.stop_cli = self.node.create_client(MoveStop, stop_srv_name)
+        # 비상정지 (HMI 비상정지 버튼, 2026-11-20): 빠른 정지 + 서보 끄기, 해제는 서보 켜기
+        from dsr_msgs2.srv import ServoOff, SetRobotControl
+        self._ServoOff, self._SetRobotControl = ServoOff, SetRobotControl
+        sys_prefix = stop_srv_name.replace('motion/move_stop', 'system/')
+        self.servo_off_cli = self.node.create_client(ServoOff, sys_prefix + 'servo_off')
+        self.ctl_cli = self.node.create_client(SetRobotControl, sys_prefix + 'set_robot_control')
+        self.estopped = False
         self.cmds = queue.Queue()           # 메인 스레드가 꺼내 가는 명령
         self.stop_event = threading.Event()
         self.answer = queue.Queue()         # 교체 전 확인의 답 ('confirm' / 'cancel')
@@ -82,25 +98,81 @@ class BedIO:
             pass
 
     def _on_cmd(self, msg):
+        self._handle(msg.data)
+
+    def _on_cmd_srv(self, req, res):
+        res.accepted, res.message = self._handle(req.command)
+        res.state = self.last_state or ''
+        return res
+
+    def _handle(self, text):
+        """명령 하나 처리. (받았나, 설명) 을 돌려준다 (서비스 응답에 그대로 씀)."""
         try:
-            d = json.loads(msg.data)
+            d = json.loads(text)
             c = d['cmd']
         except (ValueError, KeyError, TypeError):
-            self.log(f'알 수 없는 명령: {msg.data!r}')
-            return
+            self.log(f'알 수 없는 명령: {text!r}')
+            return False, f'알 수 없는 명령: {text!r}'
+        if c == 'estop':
+            return self._estop()
+        if c == 'estop_reset':
+            return self._estop_reset()
         if c == 'stop':
             self.stop_event.set()
+            sent = False
             if self.busy and self.stop_cli.service_is_ready():
                 req = self._MoveStop.Request()
                 req.stop_mode = 1           # DR_QSTOP: 빠른 정지(서보는 켜진 채)
                 self.stop_cli.call_async(req)
+                sent = True
             self.log('정지 요청을 받았습니다.')
-        elif c in ('confirm', 'cancel'):
+            return True, '정지 요청 받음' + (' (로봇 빠른 정지 명령 보냄)' if sent else ' (움직이는 중 아님)')
+        if c in ('confirm', 'cancel'):
+            if self.last_state != 'confirm':
+                return False, '확인을 기다리는 중이 아닙니다.'
             self.answer.put(c)
-        elif self.busy:
+            return True, '진행' if c == 'confirm' else '취소'
+        if self.estopped:
+            return False, '비상정지 상태입니다. 안전을 확인하고 HMI "초기화"(비상정지 해제)를 먼저 하세요.'
+        if self.busy:
             self.log(f'실행 중이라 "{c}" 명령은 무시합니다. (정지만 받습니다)')
-        else:
-            self.cmds.put(d)
+            return False, f'실행 중이라 "{c}" 명령은 무시합니다. (정지만 받습니다)'
+        self.cmds.put(d)
+        return True, f'"{c}" 명령 받음'
+
+    def _estop(self):
+        """비상정지: 공정 정지 표시를 먼저 세우고(충돌 자동 복구가 서보를 다시 켜지 않게) 빠른 정지 → 서보 끄기."""
+        self.estopped = True
+        self.stop_event.set()
+        sent = []
+        if self.stop_cli.service_is_ready():
+            req = self._MoveStop.Request()
+            req.stop_mode = 0               # DR_QSTOP_STO: 빠른 정지
+            self.stop_cli.call_async(req)
+            sent.append('빠른 정지')
+        if self.servo_off_cli.service_is_ready():
+            req = self._ServoOff.Request()
+            req.stop_type = 1               # STOP_TYPE_QUICK
+            self.servo_off_cli.call_async(req)
+            sent.append('서보 끄기')
+        self.log(f'⚠ 비상정지 (HMI): {" + ".join(sent) or "로봇 서비스 없음"}')
+        if not sent:
+            return False, '로봇 서비스(move_stop/servo_off)가 없습니다. 펜던트 비상정지를 누르세요.'
+        return True, '비상정지: ' + ' + '.join(sent) + ' 요청 보냄'
+
+    def _estop_reset(self):
+        """비상정지 해제: 서보 켜기 (SAFE_OFF → STANDBY). 공정은 다시 시작해야 한다."""
+        if self.busy:
+            return False, '공정이 아직 정리 중입니다. 잠시 뒤 다시 누르세요.'
+        if not self.ctl_cli.service_is_ready():
+            return False, '로봇 서비스(set_robot_control)가 없습니다.'
+        req = self._SetRobotControl.Request()
+        req.robot_control = 3               # CONTROL_RESET_SAFE_OFF: 서보 켜기
+        self.ctl_cli.call_async(req)
+        self.estopped = False
+        self.stop_event.clear()
+        self.log('비상정지 해제: 서보 켜기 요청 (로봇 상태는 HMI 에서 확인)')
+        return True, '비상정지 해제: 서보 켜기 요청 보냄. 다시 시작하세요.'
 
     def log(self, text):
         self.node.get_logger().info(text)
@@ -114,6 +186,7 @@ class BedIO:
                  'curve': [[round(float(z), 3), round(float(f), 3)] for z, f in curve]})))
 
     def send_status(self, status):
+        self.last_state = status.get('state')
         self.pub_status.publish(String(data=json.dumps(status, ensure_ascii=False)))
 
     def close(self):
@@ -197,6 +270,7 @@ class BedProcess:
         self.robot = BedRobot(dr, node, self.log, self.io.stop_event)
         self.tasks = BedTasks(self.robot, self.points, self.log)
         self.robot.wait_services()
+        self._wrap_tasks()
         self.log(f'교시 파일: {self.teach_file} / 칸 간격: 열 {self.axes["pitch_col"]:.1f}mm, '
                  f'행 {self.axes["pitch_row"]:.1f}mm')
 
@@ -223,7 +297,9 @@ class BedProcess:
                 # 홈 이동도 막는다: 그리퍼가 커버나 블록을 물고 있을 수 있어서 그대로 움직이면 위험하다
                 raise BedError('지난번에 커버/블록 동작 중에 멈췄습니다. 그리퍼가 물고 있는 것을 손으로 빼고, '
                                '실제 블록 위치, 커버, 천 상태를 확인해 "재고 수정"에서 저장한 뒤 다시 시작하세요.')
-            self.publish(state='running', mode=mode, message='', detail='', active_slot=None,
+            self.publish(state='running', mode=mode, message='', detail='', active_slot=None, emergency=None,
+                         active_rack=None, active_move=None,
+                         target=cmd.get('target') if c == 'start' else None,       # 'user' = 주문 모드 (화면 색 구분용)
                          **({} if mode == 'home' else {'first': None, 'second': None, 'plan': None}))
             tcp = self.robot.prepare()
             if mode == 'home':
@@ -233,6 +309,9 @@ class BedProcess:
                 self._calibrate()
             else:
                 self._pipeline(mode, cmd, tcp)
+                if getattr(self, '_string_open', False):
+                    # 예외 상황 2 (11-22 형님): 실을 풀고 블록을 썼으면, 주문을 다 만든 뒤 실을 다시 고정해서 마무리
+                    self._string_op('fix')
         except BedStop:
             self.log('정지했습니다.')
             self.publish(state='stopped', active_slot=None,
@@ -369,6 +448,13 @@ class BedProcess:
         from bed_inspect.bed_robot import BedError
         # 높은 큐브 판별(z)은 주문 모드(target user)에서만. 첫 불량 검사(자동 보수)·측정에서는 높이를 보지 않는다 (2026-11-20 형님)
         self.tall_dz = cfg.TALL_DZ if (mode == 'repair' and cmd.get('target', 'auto') == 'user') else None
+        self._restock_n = 0
+        self._string_open = False          # 예외 상황 2 에서 실 고정을 풀었는지 (공정 끝에 다시 고정)
+        self._order_mode = (mode == 'repair' and cmd.get('target', 'auto') == 'user')   # 주문 모드
+        # 주문 모드는 트레이에서 가져갈 때와 침대에 구성한 뒤 높이를 재야 한다 → 높이를 안 본 공정(기본 공정)이 만든 맵은 쓰지 않는다
+        if self.tall_dz is not None and not getattr(self, 'map_tall', False):
+            self.map = {'bed': None, 'tray': None}
+        self.map_tall = self.tall_dz is not None
         if mode == 'repair':
             profile = cmd.get('profile')
             if cmd.get('target', 'auto') == 'user' and (
@@ -454,6 +540,7 @@ class BedProcess:
             if mv['dst'][0] == 'rack' and self.map['tray'] is None:
                 self._check_rack_empty(mv['dst'][1])        # 맵이 없을 때만 빈자리를 살짝 닿아 확인
             self.step(cfg.STEP_PUT if mv['dst'][0] == 'bed' else cfg.STEP_TAKE, bed_math.move_text(mv))
+            self.publish(active_move={'src': [mv['src'][0], mv['src'][1] + 1], 'dst': [mv['dst'][0], mv['dst'][1] + 1]})
             with self._critical():
                 self.tasks.move_block(mv)
                 bed_math.apply_move(self.inv['bed'], self.inv['rack'], mv)
@@ -462,6 +549,7 @@ class BedProcess:
             plan['done'] = n + 1
             self.publish(plan=plan)
 
+        self.publish(active_move=None, active_rack=None)
         # 7단계: 커버 닫기
         self._cover(cfg.STEP_CLOSE, opening=False)
 
@@ -532,6 +620,7 @@ class BedProcess:
                 continue
             j = t['slot'] - 1
             self.step(cfg.STEP_CHECK, f'보관대 {j + 1}번 누르기 ({todo.index(n) + 1}/{len(todo)})')
+            self.publish(active_rack=j + 1)
             res = self.tasks.press_rack(j)
             if res['error'] == 'bad_fit':
                 self.log(f'보관대 {j + 1}번: {res["note"]} → 다시 측정')
@@ -588,7 +677,8 @@ class BedProcess:
         from pjt_test1 import repair_test as rt
         if not hasattr(self, '_rt_default'):
             self._rt_default = {k: getattr(cfg, k) for k in ('F_TARGET', 'F_FIT_MIN', 'PRESS_STEP', 'SEARCH_MAX',
-                                                            'PROBE_VEL', 'PRESS_DEPTH_MAX')}
+                                                            'PROBE_VEL', 'PRESS_DEPTH_MAX', 'PRESS_APPROACH_DZ',
+                                                            'RACK_PRESS_APPROACH_DZ')}
         s = (rt.PAD if cfg.REPAIR_PAD else rt.BARE) if side == 'bed' else rt.BARE
         cfg.F_TARGET, cfg.F_FIT_MIN, cfg.PRESS_STEP = s['force'], s['from'], s['step']
         self._rt_active = True
@@ -598,6 +688,15 @@ class BedProcess:
         # 가짜 로봇(bed_sim)은 멈추지 않고 내려가는 빠른 탐색(amovel + 정지)을 흉내 내지 못한다 → 계단식만
         cfg.PROBE_VEL = 0.0 if sim else rt.PROBE_VEL
         cfg.PRESS_DEPTH_MAX = 0.0 if sim else (cfg.PRESS_DEPTH_MAX_BED if side == 'bed' else cfg.PRESS_DEPTH_MAX_TRAY)
+        # 주문 모드: 키 큰 큐브가 있다고 보고 처음부터 높게 접근 (탐색 거리·깊이 한계도 같이 늘려 바닥 기준은 그대로)
+        raise_ = cfg.ORDER_APPROACH_RAISE if (self.tall_dz is not None and not sim) else 0.0
+        cfg.PRESS_APPROACH_DZ = self._rt_default['PRESS_APPROACH_DZ'] + raise_
+        cfg.RACK_PRESS_APPROACH_DZ = self._rt_default['RACK_PRESS_APPROACH_DZ'] + raise_
+        cfg.SEARCH_MAX += raise_
+        if cfg.PRESS_DEPTH_MAX:
+            cfg.PRESS_DEPTH_MAX += raise_
+        if raise_:
+            self.log(f'주문 모드: 키 큰 큐브 대비 {raise_:g}mm 높게 접근 (빠른 접근 {cfg.PRESS_APPROACH_DZ:g}mm)')
         self.log(f'측정 설정 (repair_test, {"침대" if side == "bed" else "트레이"}): 목표 {s["force"]:g}N, '
                  f'계산 {s["from"]:g}N~, 스텝 {s["step"]:g}mm, {cfg.SEARCH_MAX:g}mm 안 닿으면 빈칸, '
                  f'빠른 탐색 {cfg.PROBE_VEL:g}mm/s, 최대 깊이 {cfg.PRESS_DEPTH_MAX:g}mm')
@@ -614,6 +713,7 @@ class BedProcess:
         empties, mism = rt.judge_bed(blocks, cfg.REPAIR_RATIO)
         if self.map['bed'] is None:
             self._map_store('bed', blocks, 'measure')
+        self._map_soft('bed', {i: i in mism for i, b in enumerate(blocks) if b['grade'] in ('ok', 'mismatch')})
         plan.update(empties=[i + 1 for i in empties], mismatch=[i + 1 for i in mism])
         self.publish(first=dict(self.status['first'], blocks=self._slim(blocks)), plan=plan)
         self.log(f'빈칸 {plan["empties"] or "없음"}, 맞지 않는 칸 {plan["mismatch"] or "없음"} (repair_test 판정, 비율 '
@@ -627,15 +727,24 @@ class BedProcess:
             return [], plan
         # 트레이: 맵이 있으면 그대로, 없으면 6자리를 모두 눌러 잰다 (repair_test 의 measure(TRAY))
         tray, _ = self._press_tray_rt()
+        ok_k = [b['k'] for b in blocks if b['grade'] == 'ok' and b.get('k')]
+        if ok_k:                # 화면 색: 트레이 큐브도 공정과 같은 기준 (정상 침대 칸 평균 × 비율보다 무르면 불량)
+            ref = statistics.mean(ok_k)
+            self._map_soft('tray', {j: bool(r.get('too_soft')) or r['k'] * cfg.RACK_TO_BED < ref * cfg.REPAIR_RATIO
+                                    for j, r in enumerate(tray) if r['grade'] != 'empty' and r.get('k')})
         try:
             rp = rt.make_plan(blocks, tray, empties, mism, cfg.RACK_TO_BED, cfg.REPAIR_RATIO)
         except PlanError as e:
+            if self._can_restock(e):                    # 예외 상황 2: 재고 부족 → 큐브 탐색해서 채운 뒤 다시 계획
+                self._restock(str(e))
+                return self._plan_repair_rt(blocks, plan)
             self.tasks.home()
             raise BedError(str(e))
-        # 재고 기록을 이번에 잰 것으로 맞춘다 (빈칸 = None, 큐브 = 보통 높이)
-        self.inv['bed'] = [None if i in empties else (self.inv['bed'][i] or cfg.H_REF) for i in range(len(cfg.P_BED))]
-        self.inv['rack'] = [None if j in rp['tray_empty'] else (self.inv['rack'][j] or cfg.H_REF)
-                            for j in range(len(cfg.P_RACK))]
+        # 재고 기록을 이번에 잰 것으로 맞춘다 (빈칸 = None, 큐브 = 보통 높이 H_REF).
+        # 기본 공정은 보통 큐브만 옮기므로 예전 재고 높이(예: 기준 바꾸기 전 30mm)는 쓰지 않는다
+        # (2026-11-20 실물: 트레이 1번이 30 으로 남아 10mm 위에서 멈춰 딱딱한 큐브를 못 잡음)
+        self.inv['bed'] = [None if i in empties else cfg.H_REF for i in range(len(cfg.P_BED))]
+        self.inv['rack'] = [None if j in rp['tray_empty'] else cfg.H_REF for j in range(len(cfg.P_RACK))]
         bed_store.save_inventory(self.inv)
         # repair_test 계획은 칸 점유를 'cube' 로만 표시한다 → 이동마다 실제 블록 높이를 재고에서 넣는다
         bed_h, rack_h = list(self.inv['bed']), list(self.inv['rack'])
@@ -660,22 +769,45 @@ class BedProcess:
     def _press_tray_rt(self):
         """트레이 6자리를 repair_test 와 같은 설정으로 눌러 잰다 (빈자리 = 20mm 안 안 닿음).
         이번 launch 에서 이미 쟀으면(맵) 누르지 않고 맵을 쓴다."""
+        if cfg.USE_STIFFNESS_MAP and self.map['tray'] is not None and any(c is None for c in self.map['tray']):
+            # 예외 상황 2 로 블록을 넣은 칸만 맵이 비어 있음 → 그 칸만 누르고 나머지는 맵
+            todo = [j for j, c in enumerate(self.map['tray']) if c is None]
+            old = self._blocks_from_map_partial('tray')
+            self._rt_use('tray')
+            for j in todo:
+                self.step(cfg.STEP_CHECK, f'새로 넣은 트레이 {j + 1}번만 누르기')
+                self.publish(active_rack=j + 1)
+                res = self.tasks.press_at(self.tasks.pt[cfg.P_RACK[j]], cfg.PRESS_APPROACH_DZ)
+                res.update(slot=j + 1)
+                k = '-' if res.get('k') is None else f'{res["k"]:.2f} N/mm'
+                self.log(f'  트레이 {j + 1}번(새로 넣음): {k}' + (f' ({res.get("note")})' if res.get('note') else ''))
+                old[j] = res
+            self._rt_use('bed')
+            self.publish(active_rack=None)
+            tray = old
+            tray_empty = bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz, self._tray_z_ref(tray))
+            self._map_store('tray', tray, 'measure')
+            return tray, tray_empty
         if cfg.USE_STIFFNESS_MAP and self.map['tray'] is not None:
             self.step(cfg.STEP_CHECK, '저장된 트레이 맵 사용 (이번 launch 에서 이미 잼)')
             tray = self._blocks_from_map('tray')
             self.log('트레이 맵: ' + self._map_text('tray'))
-            return tray, bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz)
+            return tray, bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz, self._tray_z_ref(tray))
         self._rt_use('tray')
         tray = []
         for j in range(len(cfg.P_RACK)):
             self.step(cfg.STEP_CHECK, f'트레이 {j + 1}번 누르기 ({j + 1}/{len(cfg.P_RACK)})')
+            self.publish(active_rack=j + 1)             # HMI 위치 지도: 지금 누르는 트레이 칸
             res = self.tasks.press_at(self.tasks.pt[cfg.P_RACK[j]], cfg.PRESS_APPROACH_DZ)
             res.update(slot=j + 1)
             k = '-' if res.get('k') is None else f'{res["k"]:.2f} N/mm'
-            self.log(f'  트레이 {j + 1}번: {k}' + (f' ({res.get("note")})' if res.get('note') else ''))
+            zs_ = res.get('z_surf') if res.get('z_surf') is not None else res.get('z0')
+            self.log(f'  트레이 {j + 1}번: {k}' + (f' (윗면 z {zs_:.1f})' if zs_ is not None else '')
+                     + (f' ({res.get("note")})' if res.get('note') else ''))
             tray.append(res)
         self._rt_use('bed')
-        tray_empty = bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz)
+        self.publish(active_rack=None)
+        tray_empty = bed_math.find_empties(tray, cfg.EMPTY_DZ, self.tall_dz, self._tray_z_ref(tray))
         self._map_store('tray', tray, 'measure')
         return tray, tray_empty
 
@@ -687,9 +819,32 @@ class BedProcess:
                            'z': b.get('z_surf') if b.get('z_surf') is not None else b.get('z0')} for b in blocks]
         self.log(f'{"침대" if side == "bed" else "트레이"} 맵 저장: ' + self._map_text(side))
 
+    def _map_soft(self, side, flags):
+        """화면 색을 공정 판정과 같게: 맵 칸에 'soft'(무름 = 기본 공정에서는 불량) 표시. flags {칸: True/False}.
+        (화면이 침대·트레이 강성을 한데 섞어 경계를 잡으면 측정 조건이 달라 색이 틀어졌음, 2026-11-20 형님)"""
+        cells = self.map.get(side)
+        if not cells:
+            return
+        for i, soft in flags.items():
+            if 0 <= i < len(cells) and not cells[i].get('empty'):
+                cells[i]['soft'] = bool(soft)
+        self.publish()
+
     def _map_text(self, side):
         return ', '.join(f'{i + 1}번 ' + ('빈칸' if c['empty'] else (f'{c["k"]:.2f}' if c['k'] else '?'))
                          for i, c in enumerate(self.map[side]))
+
+    def _blocks_from_map_partial(self, side):
+        """맵에 빈(None) 칸이 섞여 있을 때: 있는 칸만 _blocks_from_map 모양으로, None 칸은 None."""
+        keep = self.map[side]
+        filled = [c if c is not None else {'k': None, 'empty': True, 'tall': False, 'too_soft': False, 'src': '?', 'z': None}
+                  for c in keep]
+        self.map[side] = filled
+        try:
+            out = self._blocks_from_map(side)
+        finally:
+            self.map[side] = keep
+        return [b if keep[i] is not None else None for i, b in enumerate(out)]
 
     def _blocks_from_map(self, side):
         """맵 → 측정 결과와 같은 모양 (find_empties / judge 가 그대로 쓰게)."""
@@ -746,14 +901,31 @@ class BedProcess:
         items = ([(b['k'], b.get('tall')) for b in blocks if b['grade'] is None and b.get('k')]
                  + [(r['k_bed'], r.get('tall')) for r in racked])
         thr = bed_math.split_classes([k for k, tall in items if not tall], 1.0 / cfg.REPAIR_RATIO)
+        ref = self._class_ref()
+        if thr is None and ref is not None:
+            # 11-22 실물: 블록을 찾아 넣었는데 그것도 같은 종류(딱딱 10.6)라 두 무리로 못 나눔 → 다시 재고 부족으로 갔음.
+            # 큐브가 한 종류뿐이면 전에 잰 종류 경계(저장값)로 판정한다
+            thr = ref['thr']
+            self.log(f'큐브가 한 종류뿐 → 저장된 종류 경계 {thr:.2f} N/mm 로 판정 (부드러움 약 {ref["soft"]:.2f}, 단단함 약 {ref["hard"]:.2f})')
         if thr is None:
+            # 11-22 실물: 트레이가 비어 있고 침대 큐브가 한 종류뿐 → 주문에 맞출 다른 종류가 없음 = 재고 부족.
+            # 예외 상황 2 로 처리 (실 풀기 → 블록 위치추정해서 트레이로) 하고 다시 계획
+            why = Exception('침대와 트레이에 한 종류의 큐브뿐이고 트레이가 비어 주문에 맞출 큐브가 모자랍니다')
+            if self._can_restock(why) and not self._string_open:   # 블록을 이미 넣었는데도 한 종류면 또 찾지 않음
+                self._restock(str(why))
+                return self._plan_order_rt(blocks, plan)
             self.tasks.home()
             raise BedError('침대와 트레이에서 잰 강성이 한 종류뿐이라 부드러움/단단함을 나눌 수 없습니다.')
         plan['thr'] = thr
         plan['centers'] = c = bed_math.class_centers(items, thr)
+        if ref is None or thr != ref.get('thr'):
+            self._save_class_ref(thr, c)
         self.log(f'종류 경계 {thr:.2f} N/mm (부드러움 약 {c["soft"] or 0:.2f}, 단단함 약 {c["hard"] or 0:.2f}) '
                  f'— repair_test 측정, 비율 {cfg.REPAIR_RATIO:g}')
         mism = bed_math.judge_profile(blocks, plan['profile'], thr, c)
+        self._map_soft('bed', {i: b.get('cls') == 'soft' for i, b in enumerate(blocks) if b.get('cls')})
+        self._map_soft('tray', {r['slot'] - 1: bed_math.class_of(r['k_bed'], thr, r.get('too_soft'), r.get('tall')) == 'soft'
+                                for r in racked})
         empties = [i for i in bed_empties]
         plan.update(empties=[i + 1 for i in empties], mismatch=[i + 1 for i in mism])
         plan['rack'] = [{'slot': r['slot'], 'k': r.get('k'), 'grade': r.get('grade'),
@@ -766,21 +938,32 @@ class BedProcess:
             self.tasks.home()
             self.publish(state='done', plan=plan, message='이미 주문대로 구성되어 있습니다.')
             return [], plan
-        cands = {r['slot'] - 1: (bed_math.class_of(r['k_bed'], thr, r.get('too_soft'), r.get('tall')), r['k_bed'])
-                 for r in racked}
+        # 침대 안의 큐브도 다른 칸으로 옮겨 쓴다 (자리만 바꾸면 되는 경우 트레이에서 찾지 않음, 2026-11-20 형님)
+        self._set_measured_inventory(empties, tray_empty, blocks, tray)
+        bed_cells = [None if i in empties else {'cls': b.get('cls'), 'h': self.inv['bed'][i] or cfg.H_REF, 'k': b.get('k'),
+                                                'keep': b['grade'] == 'nodata'}
+                     for i, b in enumerate(blocks)]
+        k_of = {r['slot'] - 1: r['k_bed'] for r in racked}
+        tray_cells = [None if j in tray_empty else
+                      {'cls': bed_math.class_of(k_of[j], thr, tray[j].get('too_soft'), tray[j].get('tall')) if j in k_of else None,
+                       'h': self.inv['rack'][j] or cfg.H_REF, 'k': k_of.get(j)} for j in range(len(tray))]
         try:
-            assign = bed_math.plan_profile(todo, plan['profile'], cands, c)
+            moves, choice = bed_math.plan_profile_moves(bed_cells, tray_cells, plan['profile'], c)
         except PlanError as e:
+            if self._can_restock(e):                    # 예외 상황 2: 재고 부족 → 큐브 탐색해서 채운 뒤 다시 계획
+                self._restock(str(e))
+                return self._plan_order_rt(blocks, plan)
             self.tasks.home()
             raise BedError(str(e))
-        self._set_measured_inventory(empties, tray_empty, blocks, tray)
-        moves = bed_math.plan_repair_moves(self.inv['bed'], self.inv['rack'], assign, mism)
-        k_of = {r['slot'] - 1: r['k_bed'] for r in racked}
-        plan.update(choice=[{'slot': i + 1, 'rack': j + 1, 'k_bed': k_of[j],
-                             'why': 'mismatch' if i in mism else 'empty'} for i, j in assign], target=None)
-        for i, j in assign:
-            self.log(f'  선택: 트레이 {j + 1}번 ({cands[j][0]}, {k_of[j]:.2f} N/mm) → {i + 1}번 '
-                     f'(주문 {plan["profile"][i]})')
+        plan.update(choice=[{'slot': ch['slot'] + 1,
+                             'rack': ch['from'][1] + 1 if ch['from'][0] == 'rack' else None,
+                             'bed': ch['from'][1] + 1 if ch['from'][0] == 'bed' else None,
+                             'k_bed': (k_of.get(ch['from'][1]) if ch['from'][0] == 'rack' else blocks[ch['from'][1]].get('k')),
+                             'why': 'mismatch' if ch['slot'] in mism else 'empty'} for ch in choice], target=None)
+        for ch in choice:
+            kind, j = ch['from']
+            self.log(f'  선택: {"침대" if kind == "bed" else "트레이"} {j + 1}번 → 침대 {ch["slot"] + 1}번 '
+                     f'(주문 {plan["profile"][ch["slot"]]})')
         return moves, plan
 
     def _plan_repair(self, blocks, cmd):
@@ -859,6 +1042,10 @@ class BedProcess:
         """9단계: 빈칸과 맞지 않는 칸이 남지 않았는지 확인한다."""
         self.step(cfg.STEP_DONE)
         empties, mism = self._judge_repair(blocks2, plan)
+        if plan.get('target_mode') == 'user':
+            self._map_soft('bed', {i: b.get('cls') == 'soft' for i, b in enumerate(blocks2) if b.get('cls')})
+        else:
+            self._map_soft('bed', {i: i in mism for i, b in enumerate(blocks2) if b['grade'] in ('ok', 'mismatch')})
         self.publish(second=dict(self.status['second'], blocks=self._slim(blocks2)))
         self.tasks.home()
         nodata = [b['slot'] for b in blocks2 if b['grade'] == 'nodata']
@@ -883,6 +1070,249 @@ class BedProcess:
         spread = (statistics.pstdev(ks) / statistics.mean(ks) * 100) if len(ks) > 1 else 0.0
         how = '사용자 지정 배치와 일치' if plan['target_mode'] == 'user' else f'강성 편차 {spread:.0f}%'
         self.publish(state='done', message=f'{fixed}번 칸을 보수했습니다. 재측정 결과 {how}.')
+
+    # ── 예외 상황 1: 충돌 ─────────────────────────────────────────────
+    def _wrap_tasks(self):
+        """로봇 작업(칸 누르기, 블록 옮기기, 커버, 홈)을 충돌 복구로 감싼다: 충돌 → 복구 → 그 작업을 다시."""
+        self._home_raw = self.tasks.home
+        for name, kind in (('press', 'press'), ('press_at', 'press'), ('press_rack', 'press'),
+                           ('touch_rack', 'press'), ('move_block', 'block'), ('home', 'home'),
+                           ('cover_open', 'cover'), ('cover_close', 'cover')):
+            if hasattr(self.tasks, name):
+                setattr(self.tasks, name, self._collision_safe(getattr(self.tasks, name), kind))
+
+    def _collision_safe(self, fn, kind):
+        from bed_inspect.bed_robot import BedCollision, BedError
+
+        def run(*a, **kw):
+            n = 0
+            while True:
+                try:
+                    return fn(*a, **kw)
+                except BedCollision as e:
+                    if not cfg.COLLISION_ENABLED:
+                        raise
+                    n += 1
+                    if n > cfg.COLLISION_RETRY_MAX:
+                        raise BedError(f'충돌이 같은 작업에서 {cfg.COLLISION_RETRY_MAX}번 넘게 반복되어 멈춥니다. ({e})')
+                    self._on_collision(e, kind, n)
+        return run
+
+    def _on_collision(self, e, kind, n):
+        """충돌 → 위치 저장 → 보호 정지 해제 → 반대 방향 후퇴 → (커버면 고리 놓고 위로) → 홈."""
+        from bed_inspect.bed_robot import BedCollision, BedError, BedStop
+        text = '충돌로 인한 긴급 프로토콜'
+        pos = [round(v, 2) for v in e.pos] if e.pos else None
+        rec = {'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'what': e.what, 'pos': pos,
+               'start': [round(v, 2) for v in e.start] if e.start else None, 'state': e.state,
+               'step': self.status.get('step'), 'step_name': self.status.get('step_name'), 'retry': n}
+        hist = bed_store._load_json('collisions.json', [])           # 충돌 위치 기록 (bed_data/collisions.json)
+        hist.append(rec)
+        bed_store._save_json('collisions.json', hist[-200:])
+        self.log(f'⚠ {text}: "{e.what}" 중 충돌, 위치 {pos} → 정지. 반대 방향으로 {cfg.COLLISION_BACKOFF:g}mm 물러난 뒤 '
+                 f'홈으로 가서 이 작업을 다시 합니다 ({n}/{cfg.COLLISION_RETRY_MAX}).')
+        self.publish(emergency={'kind': 'collision', 'text': text, 'what': e.what, 'pos': pos, 'retry': n},
+                     message=f'{text}: {e.what} 중 충돌')
+        try:
+            d = self.robot.recover_collision(e, cfg.COLLISION_BACKOFF)
+            self.log(f'  후퇴 방향 {[round(v, 2) for v in d]} ({cfg.COLLISION_BACKOFF:g}mm)')
+            if kind == 'cover':
+                self.robot.grip('cover_open')               # 고리를 놓고 위로 빠진 뒤 홈 (뚜껑을 끌고 가지 않게)
+                self.robot.move_z(cfg.COLLISION_COVER_UP)
+                self.robot.wait_still('고리 놓고 올라온 뒤')
+            self._collision_home(lid_open=kind == 'cover' or bool(self.world.get('cover_open')))
+        except BedCollision as e2:
+            raise BedError(f'충돌 복구 중 다시 충돌했습니다. 로봇 주변을 확인하고 다시 시작하세요. ({e2})')
+        if kind == 'cover':
+            self.publish(state='confirm', message=f'{text}: 커버 작업 중 충돌해 고리를 놓았습니다. 뚜껑을 원래 상태로 '
+                                                  '두고 "진행"을 누르면 커버 작업을 처음부터 다시 합니다.')
+            if self._wait_answer() == 'cancel':
+                raise BedStop()
+            self.publish(state='running')
+        self.publish(emergency=None, message='')
+        self.log('충돌 복구 완료 → 하던 작업을 다시 합니다.')
+
+    def _collision_home(self, lid_open):
+        """충돌 복구 후 홈으로: 뚜껑이 열려 있고 로봇이 뚜껑 쪽이면 교시한 우회 경로(E1 → E2), 아니면 위로 올라가서 바로."""
+        y = self.robot.cur_posx()[1]
+        if lid_open and cfg.COVER_ENABLED and cfg.COVER_EXIT_POSJ and y < cfg.COLLISION_DETOUR_Y:
+            self.log(f'  뚜껑 열림 + 뚜껑 쪽(y {y:.0f}) → 우회 경로로 홈')
+            for i, j in enumerate(cfg.COVER_EXIT_POSJ, 1):
+                self.robot.movej_to({'name': f'cover_exit_{i}', 'posj': list(j)}, slow=True)
+        else:
+            self.log(f'  {"뚜껑 열림, 뚜껑에서 떨어져 있음" if lid_open else "뚜껑 닫힘"} (y {y:.0f}) → '
+                     f'{cfg.COLLISION_LIFT:g}mm 올라가서 홈')
+            self.robot.move_z(cfg.COLLISION_LIFT, cfg.VELX_SLOW, cfg.ACCX_SLOW)
+        self._home_raw()
+        self.robot.wait_still('홈 도착 후')
+
+    # ── 예외 상황 2: 재고 부족 ────────────────────────────────────────
+    def _can_restock(self, e):
+        # 11-22 형님: 재고 부족 예외(실 unfix → 블록 탐지 → 트레이 → 주문 완성 → fix)는 주문 모드에서만.
+        # 기본 공정(불량 교체)에서는 아예 일으키지 않는다 (충돌 예외는 기본 공정에도 그대로)
+        return (cfg.RESTOCK_ENABLED and getattr(self, '_order_mode', False) and '모자랍니다' in str(e)
+                and getattr(self, '_restock_n', 0) < cfg.RESTOCK_MAX)
+
+    def _restock(self, why):
+        """cube_search 로 탐색 영역의 큐브를 찾아 잡고 교체 트레이 빈칸에 넣은 뒤 트레이 맵을 지운다(다시 잼)."""
+        from bed_inspect.bed_robot import BedError
+        self._restock_n += 1
+        text = '재고 부족: 큐브 탐색으로 트레이 보충'
+        self.log(f'⚠ {text} ({self._restock_n}/{cfg.RESTOCK_MAX}) — {why}')
+        self.step(cfg.STEP_CHECK, '재고 부족 → 탐색 영역에서 큐브 찾기 (cube_search)')
+        self.publish(emergency={'kind': 'restock', 'text': text, 'what': why})
+        # 넣을 트레이 칸: 예외 전에 잰 트레이 맵(침대 측정 뒤 6칸 다 잰 것)의 빈칸. 실을 풀기 전에 먼저 확인 (빈칸 없으면 풀지 않고 멈춤) (11-22 형님: 트레이를 다시 확인하지 말고)
+        cell = None
+        if self.map.get('tray'):
+            empt = [j for j, c in enumerate(self.map['tray']) if c is not None and c.get('empty')]
+            if not empt:
+                raise BedError('재고 부족 → 트레이 맵에 빈칸이 없어 찾은 블록을 넣을 곳이 없습니다.')
+            cell = empt[0] + 1
+            self.log(f'트레이 맵의 빈칸 {cell}번에 넣습니다 (트레이 다시 확인 안 함)')
+        if cfg.STRING_RESTOCK and not self._string_open:
+            # 11-22 형님: 블록이 실 사이에 묶여 적재돼 있다고 보고, 먼저 실 고정을 풀어(unfix, 중간 나사까지 다시 꽂아 둠)
+            # 블록을 자유롭게 한 뒤 위치추정(cube_search)으로 찾아 트레이에 넣는다. 공정이 끝나면 다시 fix.
+            self._string_op('unfix')
+        try:
+            from pjt_test1 import cube_search as cs
+        except ImportError as e:
+            raise BedError(f'재고가 모자라는데 cube_search 를 불러오지 못했습니다 ({e}). pjt_test1 을 빌드하세요.')
+        lines = []
+
+        def log(m):
+            lines.append(m)
+            self.log('[큐브 탐색] ' + m)
+        cs.input = lambda prompt='': 'n'            # 탐지 경고가 있으면 묻지 않고 잡지 않는다 (사람이 확인)
+        self._home_raw()
+        try:
+            ccfg = cs.load_cfg()
+            io = cs.RobotIO(self.robot.node, ccfg, log)
+            io.prepare()
+            live = None
+            if hasattr(cs, 'LivePub'):
+                try:
+                    if getattr(self, '_live_pub', None) is None:
+                        self._live_pub = cs.LivePub(self.robot.node)     # /cube_search/live → HMI 실시간 탐지 창
+                    live = self._live_pub
+                except Exception:
+                    live = None
+            cs.Job(io, ccfg, log, live=live).pick_place(cell=cell)
+        except cs.SearchError as e:
+            raise BedError(f'재고 부족 → 큐브 탐색 실패: {e}')
+        finally:
+            try:
+                self._home_raw()
+            except Exception:
+                pass
+        if not any(m.startswith('완료') for m in lines):
+            raise BedError('재고 부족 → 큐브를 찾았지만 경고가 있어 잡지 않았습니다. 로그를 확인하세요.')
+        if cell is not None:
+            self.map['tray'][cell - 1] = None        # 넣은 칸만 다시 잰다 (강성 모름), 나머지는 맵 그대로
+        else:
+            self.map['tray'] = None                 # 맵이 없었으면 트레이 전체를 다시 잰다
+        self.publish(emergency=None)
+        self.log('트레이 보충 완료 → 트레이를 다시 재고 계획부터 이어서 합니다.')
+
+    def _string_op(self, action):
+        """실 고정해제(unfix) / 고정(fix) — string_v1 최종본(11-22)을 같은 로봇으로 실행.
+        나사 돌리기는 OnRobot 서비스 모드(40N) 그리퍼라서 그 동안만 그리퍼 모드를 바꾼다."""
+        from bed_inspect.bed_robot import BedError
+        from bed_inspect import string_v1_config as ssc
+        from bed_inspect import string_v1_plan as splan
+        from bed_inspect.string_v1_demo import StringDemo
+        name = {'unfix': '실 고정해제 (블록 풀기)', 'fix': '실 다시 고정 (마무리)'}[action]
+        # 11-22 형님: 실 풀기/고정은 탐지를 위한 단계일 뿐 예외 상황 자체가 아님 → 알람(emergency)은 재고 부족 한 번만
+        self.log(f'{name} 시작 (재고 부족 처리 단계)')
+        self.step(cfg.STEP_CHECK if action == 'unfix' else cfg.STEP_DONE, name)
+        old_mode = cfg.GRIPPER_MODE
+        for k, w in getattr(ssc, 'GRIP_WIDTHS', {'screw_open': 25, 'screw_grip': 10}).items():
+            cfg.GRIP_WIDTH.setdefault(k, w)
+        try:
+            if old_mode == 'io' and ssc.GRIPPER_MODE == 'service':
+                # 블록 잡기에서 켠 WebLogic DO(1·2)가 남아 있으면 OnRobot 서비스 명령과 부딪힐 수 있음 → 먼저 끈다
+                for idx in (cfg.DO_CLOSE, cfg.DO_OPEN):
+                    self.robot.dr.set_digital_output(idx, 0)
+                self.robot.sleep(0.5)
+                self.log('그리퍼: WebLogic DO 끄고 OnRobot 서비스 모드(나사용 40N)로')
+            cfg.GRIPPER_MODE = ssc.GRIPPER_MODE
+            if cfg.GRIPPER_MODE == 'service' and self.robot._grip_cli is None:
+                from onrobot_rg_msgs.srv import SetCommand
+                self.robot._grip_cli = self.robot.node.create_client(SetCommand, '/onrobot/sendCommand')
+                if not self.robot._grip_cli.wait_for_service(timeout_sec=5.0):
+                    raise BedError('실 고정/해제: 그리퍼 서비스(/onrobot/sendCommand)가 없습니다.')
+            demo = StringDemo(self.robot, self.robot.dr, self.robot.node, self.log)
+            demo.virtual = cfg.VIRTUAL
+            self._home_raw()
+            try:
+                if action == 'unfix':
+                    demo.unfix(splan.unfix_points(ssc.PLACE_XYZ))
+                    self._string_open = True
+                else:
+                    demo.fix(splan.fix_points(ssc.PICK_XYZ))
+                    self._string_open = False
+            except splan.StringPlanError as e:
+                raise BedError(f'{name}: 설정 오류 {e}')
+            self._home_raw()
+        finally:
+            if cfg.GRIPPER_MODE != old_mode:
+                self.log(f'그리퍼: 다시 {old_mode} 모드로 (블록 잡기)')
+            cfg.GRIPPER_MODE = old_mode
+        if old_mode == 'io':
+            # OnRobot 서비스(Modbus)로 움직인 뒤 WebLogic(DO) 쪽을 알려진 상태(열림)로 맞춰 둔다
+            try:
+                self.robot.grip('block_open')
+            except Exception:
+                pass
+        self.log(f'{name} 완료')
+
+    def _tray_z_ref(self, tray):
+        """트레이 '보통 큐브 윗면 높이' 기준. 트레이에 잰 큐브가 3개 이상이면 None(그 중앙값을 씀).
+        적으면(한두 개) 그 큐브 자신이 기준이 되어 높은 큐브를 못 알아봄 → 침대 맵의 보통 큐브 윗면 중앙값을
+        교시 잡는 높이 차이(침대 _down - 트레이 _down)만큼 옮겨 쓴다 (11-22 실물: 트레이 6번 높은 부드러움을 보통으로 봄)."""
+        if self.tall_dz is None:
+            return None
+        n = sum(1 for b in tray if b is not None and b.get('k') is not None and b.get('z_surf') is not None)
+        if n >= 3:
+            return None
+        bed = self.map.get('bed') or []
+        zs = [c['z'] for c in bed if c and not c.get('empty') and not c.get('tall') and c.get('z') is not None]
+        try:
+            bd = [self.points[nm]['down'][2] for nm in cfg.P_BED if self.points.get(nm, {}).get('down')]
+            rd = [self.points[nm]['down'][2] for nm in cfg.P_RACK if self.points.get(nm, {}).get('down')]
+        except (KeyError, IndexError, TypeError):
+            bd, rd = [], []
+        if not zs or not bd or not rd:
+            return None
+        ref = statistics.median(zs) - statistics.mean(bd) + statistics.mean(rd)
+        self.log(f'트레이 큐브가 {n}개뿐 → 높이 기준을 침대에서 옮겨 씀: 보통 큐브 윗면 z {ref:.1f} (높다 판단 +{self.tall_dz:.1f}mm)')
+        return ref
+
+    def _class_ref(self):
+        """전에 두 종류로 나눴을 때의 경계·중심 (DATA_DIR/class_ref.json). 없으면 설정값 CLASS_THR_FALLBACK."""
+        import json
+        path = os.path.join(cfg.DATA_DIR, 'class_ref.json')
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            if d.get('thr'):
+                return d
+        except (OSError, ValueError):
+            pass
+        if cfg.CLASS_THR_FALLBACK:
+            t = cfg.CLASS_THR_FALLBACK
+            return {'thr': t, 'soft': t * cfg.REPAIR_RATIO, 'hard': t / cfg.REPAIR_RATIO, 'src': 'config'}
+        return None
+
+    def _save_class_ref(self, thr, centers):
+        import json
+        if not (centers.get('soft') and centers.get('hard')):
+            return                                   # 두 종류가 다 있을 때만 저장
+        try:
+            os.makedirs(cfg.DATA_DIR, exist_ok=True)
+            with open(os.path.join(cfg.DATA_DIR, 'class_ref.json'), 'w') as f:
+                json.dump({'thr': thr, 'soft': centers['soft'], 'hard': centers['hard'], 'time': time.time()}, f)
+        except OSError:
+            pass
 
     def _wait_answer(self):
         while True:

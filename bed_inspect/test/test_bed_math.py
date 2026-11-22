@@ -465,3 +465,75 @@ def test_plan_fill_uniform_and_mixed():
 def test_plan_fill_not_enough_cubes():
     with pytest.raises(bm.PlanError):
         bm.plan_fill([2, 3], {0: 8.0}, {0: 8.0}, 3, 2)
+
+
+# ── 주문: 침대 안 큐브 자리 바꾸기 (2026-11-20) ──
+def _cell(cls, k=None):
+    return {'cls': cls, 'h': 20.0, 'k': k}
+
+
+def _run(bed, tray, moves):
+    from bed_inspect import bed_math as bm
+    bed, tray = list(bed), list(tray)
+    for m in moves:
+        (sk, si), (dk, di) = m['src'], m['dst']
+        src = bed if sk == 'bed' else tray
+        c, src[si] = src[si], None
+        (bed if dk == 'bed' else tray)[di] = c
+    return bed, tray
+
+
+def test_order_swaps_within_bed_without_tray_soft():
+    """침대에 부드러운 큐브 2개가 있고 자리만 바꾸면 될 때: 트레이에 부드러운 큐브가 없어도 계획이 선다."""
+    from bed_inspect import bed_math as bm
+    bed = [_cell('soft'), _cell('soft'), _cell('hard'), _cell('hard'), _cell('hard'), _cell('tall')]
+    tray = [_cell('hard', 12), _cell('hard', 12), None, _cell('tall'), None, _cell('hard', 11)]
+    profile = ['hard', 'hard', 'soft', 'soft', 'hard', 'tall']
+    moves, choice = bm.plan_profile_moves(bed, tray, profile)
+    b2, _ = _run(bed, tray, moves)
+    assert [c['cls'] for c in b2] == profile
+    # 트레이의 원래 큐브 중 부드러운 것은 없으므로, 침대의 부드러운 큐브 2개가 (잠깐 트레이를 거쳐서라도) 자리를 바꿨다
+    assert len(moves) <= 6
+
+
+def test_order_shortage_counts_bed_and_tray():
+    from bed_inspect import bed_math as bm
+    bed = [_cell('hard')] * 6
+    tray = [_cell('hard'), None, None, None, None, None]
+    with pytest.raises(bm.PlanError, match='모자랍니다'):
+        bm.plan_profile_moves(bed, tray, ['soft'] + ['hard'] * 5)
+
+
+def test_order_keeps_unknown_slot():
+    from bed_inspect import bed_math as bm
+    bed = [{'cls': None, 'h': 20.0, 'k': None, 'keep': True}] + [_cell('hard')] * 5
+    tray = [_cell('soft', 7), None, None, None, None, None]
+    moves, _ = bm.plan_profile_moves(bed, tray, ['soft', 'hard', 'hard', 'hard', 'hard', 'soft'])
+    assert all(m['src'] != ('bed', 0) and m['dst'] != ('bed', 0) for m in moves)
+
+
+def test_order_uses_bed_empty_first_then_tray():
+    """침대에 빈칸이 있으면: 침대 안에서 자리가 틀린 큐브를 빈칸으로 먼저 옮기고, 모자란 것만 트레이에서 (트레이 빈자리 없어도 됨)."""
+    from bed_inspect import bed_math as bm
+    bed = [_cell('soft'), None, _cell('hard'), _cell('hard'), None, _cell('hard')]
+    tray = [_cell('hard', 12), _cell('soft', 7), _cell('hard', 12), _cell('hard', 12), _cell('tall'), _cell('tall')]  # 트레이 꽉 참
+    profile = ['hard', 'soft', 'hard', 'hard', 'hard', 'hard']
+    moves, choice = bm.plan_profile_moves(bed, tray, profile)
+    assert moves[0] == {'src': ('bed', 0), 'dst': ('bed', 1), 'h': 20.0}    # 침대 1번 소프트 → 빈칸 2번 먼저
+    assert all(m['dst'][0] == 'bed' for m in moves)                          # 트레이 빈자리는 안 씀
+    b2, _ = _run(bed, tray, moves)
+    assert [c['cls'] for c in b2] == profile
+
+
+def test_find_empties_tall_with_external_reference():
+    """트레이에 큐브가 하나뿐이면 자기 자신이 기준이 돼 높은 큐브를 못 알아봄 → 침대에서 옮긴 기준(z_ref)을 쓰면 알아봄 (11-22)."""
+    from bed_inspect import bed_math as bm
+    one = [{'k': None, 'z0': None, 'z_surf': None, 'error': 'no_contact'} for _ in range(5)]
+    one.append({'k': 5.4, 'z0': 110.0, 'z_surf': 110.0, 'error': None})
+    bm.find_empties([dict(b) for b in one], 8.0, 4.5)
+    t = [dict(b) for b in one]
+    bm.find_empties(t, 8.0, 4.5)
+    assert not t[5]['tall']                                   # 기준 없으면 못 알아봄
+    t = [dict(b) for b in one]
+    bm.find_empties(t, 8.0, 4.5, z_ref=100.6)
+    assert t[5]['tall']

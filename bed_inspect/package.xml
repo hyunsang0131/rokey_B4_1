@@ -14,6 +14,7 @@
   <exec_depend>onrobot_rg_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>
+  <exec_depend>bed_interfaces</exec_depend>
   <exec_depend>cushion_hmi</exec_depend>
 
   <test_depend>python3-pytest</test_depend>

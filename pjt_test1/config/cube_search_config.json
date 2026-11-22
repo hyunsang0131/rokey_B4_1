@@ -1,0 +1,22 @@
+{
+ "_설명": "area/z_floor 는 반드시 실물에 맞게. 단위 mm, N, mm/s. 여기 없는 항목은 cube_search.py 의 DEFAULT_CFG 값 (같은 이름으로 넣으면 덮어씀)",
+ "area": {
+  "x_min": 204.81,
+  "x_max": 344.81,
+  "y_min": -73.94,
+  "y_max": 76.06
+ },
+ "edge_margin": 25.0,
+ "z_floor": 64.22,
+ "tray_floor_z": 78.57,
+ "cube": {
+  "long": 64.0,
+  "short": 41.0,
+  "h_min": 10.0,
+  "h_max": 30.0
+ },
+ "grasp_side": "long",
+ "grasp_depth": 17.0,
+ "z_travel": 170.0,
+ "tray_file": "~/ws_cobot_pjt/teach_points/exchange_fin.json"
+}

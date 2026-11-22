@@ -27,6 +27,33 @@ class BedStop(Exception):
     """사용자가 정지를 눌렀다."""
 
 
+class BedCollision(BedError):
+    """충돌(사람이 치는 등)로 컨트롤러가 보호 정지했다. 예외 상황 1 (2026-11-20 형님).
+
+    pos: 멈춘 위치(충돌 위치) posx, start: 그 동작을 시작한 위치, target: 목표(알면), what: 하던 동작.
+    """
+    def __init__(self, what, pos, start, target, state):
+        super().__init__(f'{what} 중 충돌 감지 (로봇 상태 {state} {STATE_NAMES.get(state, "")})')
+        self.what, self.pos, self.start, self.target, self.state = what, pos, start, target, state
+
+    def retreat_dir(self):
+        """충돌 반대 방향 (단위 벡터, 베이스 xyz): 움직이던 방향의 반대. 움직인 거리가 거의 없으면 목표 방향의 반대,
+        그것도 모르면 위쪽(+z)."""
+        def unit(v):
+            n = sum(c * c for c in v) ** 0.5
+            return None if n < 2.0 else [c / n for c in v]
+        d = None
+        if self.pos and self.start:
+            d = unit([a - b for a, b in zip(self.pos[:3], self.start[:3])])
+        if d is None and self.pos and self.target:
+            d = unit([a - b for a, b in zip(self.target[:3], self.pos[:3])])
+        return [0.0, 0.0, 1.0] if d is None else [-c for c in d]
+
+
+# 충돌 시 컨트롤러가 들어가는 보호 정지 상태 (비상정지 버튼 6 EMERGENCY_STOP 은 사람이 누른 것이라 여기 넣지 않음)
+COLLISION_STATES = (3, 5, 9, 10)     # SAFE_OFF, SAFE_STOP, SAFE_STOP2, SAFE_OFF2
+
+
 class BedRobot:
     def __init__(self, dr, node, log, stop_event=None):
         """dr: DSR_ROBOT2 모듈, node: DSR 용 노드, log: 로그 함수(문자열 1개), stop_event: 정지 요청."""
@@ -39,6 +66,8 @@ class BedRobot:
         self.tcp = None
         self.emu = None                     # 에뮬레이터 가짜 힘 (bed_emu). 실제 로봇에서는 None
         self._stop_cli = None               # motion/move_stop (probe_down 에서 처음 쓸 때 만든다)
+        self._ctl_cli = None                # system/set_robot_control (충돌 복구)
+        self._mv = (None, None, '')         # 지금 동작의 (시작 위치, 목표, 이름) — 충돌 반대 방향 계산용
 
     # ── 준비 ──────────────────────────────────────────────────────────
     def wait_services(self, timeout=30.0):
@@ -58,8 +87,11 @@ class BedRobot:
                     raise BedError(f'서비스가 없습니다: {cli.srv_name} (bringup 이 떠 있는지 확인)')
 
     def prepare(self):
-        """움직일 수 있는 상태인지 확인하고 AUTONOMOUS 모드로 바꾼다."""
+        """움직일 수 있는 상태인지 확인하고 AUTONOMOUS 모드로 바꾼다.
+        TCP 가 공정 좌표의 TCP(cfg.COVER_TCP)와 다르면(비상정지·서보 끄기·bringup 재시작 뒤 비어 있는 경우 등)
+        MANUAL 로 바꿔 자동으로 맞춘다 (2026-11-21 형님: 비상정지 후 다시 켜면 TCP 가 비어 오류)."""
         self.require_standby('시작')
+        self._ensure_tcp()
         if self.dr.get_robot_mode() != self.dr.ROBOT_MODE_AUTONOMOUS:
             self.log('MANUAL → AUTONOMOUS 모드로 전환')
             if self.dr.set_robot_mode(self.dr.ROBOT_MODE_AUTONOMOUS) != 0:
@@ -67,6 +99,26 @@ class BedRobot:
         tcp = self.dr.get_tcp()
         self.tcp = tcp if isinstance(tcp, str) else ''
         return self.tcp
+
+    def _ensure_tcp(self):
+        want = cfg.COVER_TCP
+        if not want or cfg.VIRTUAL:
+            return
+        tcp = self.dr.get_tcp()
+        tcp = tcp if isinstance(tcp, str) else ''
+        if tcp == want or tcp == cfg.SIM_TCP:
+            return
+        self.log(f'TCP 가 "{tcp or "없음"}" 입니다 → "{want}" 로 자동 설정 (MANUAL 에서 설정 후 AUTONOMOUS)')
+        if self.dr.get_robot_mode() != self.dr.ROBOT_MODE_MANUAL:
+            if self.dr.set_robot_mode(self.dr.ROBOT_MODE_MANUAL) != 0:
+                raise BedError('TCP 설정을 위해 MANUAL 모드로 바꾸지 못했습니다.')
+        ok = self.dr.set_tcp(want)
+        self.sleep(0.3)
+        now = self.dr.get_tcp()
+        if ok != 0 or now != want:
+            raise BedError(f'TCP 를 "{want}" 로 설정하지 못했습니다 (지금 "{now or "없음"}"). 펜던트에 그 TCP 이름이 '
+                           f'있는지 확인하거나 ros2 run robot_setting tool_tcp set --tcp {want} 를 실행하세요.')
+        self.log(f'TCP 설정 완료: {now}')
 
     # ── 상태 확인 ─────────────────────────────────────────────────────
     def state(self):
@@ -90,9 +142,28 @@ class BedRobot:
         if self.stop_event is not None and self.stop_event.is_set():
             raise BedStop()
 
+    def _begin(self, what, target=None):
+        """동작 시작 전: 시작 위치와 목표를 기억한다 (충돌 시 반대 방향 계산)."""
+        try:
+            start = self.cur_posx()
+        except Exception:
+            start = None
+        self._mv = (start, None if target is None else [float(v) for v in target], what)
+
+    def _collision(self, what, s):
+        try:
+            pos = self.cur_posx()
+        except Exception:
+            pos = None
+        start, target, w = self._mv
+        return BedCollision(w or what, pos, start, target, s)
+
     def require_standby(self, what):
         self.check_stop()
-        if self.state() != STATE_STANDBY:
+        s = self.state()
+        if s in COLLISION_STATES:
+            raise self._collision(what, s)
+        if s != STATE_STANDBY:
             raise BedError(f'{what}: 움직일 수 없습니다. {self.fault_text()} '
                            '→ 원인 확인 후 servo_on 으로 복구하세요.')
 
@@ -100,6 +171,9 @@ class BedRobot:
         """이동 함수의 반환값 확인. 정지 요청이 먼저, 그 다음 실패."""
         self.check_stop()
         if ret != 0:
+            s = self.state()
+            if s in COLLISION_STATES:
+                raise self._collision(what, s)
             raise BedError(f'{what} 실패. {self.fault_text()}')
 
     def sleep(self, sec):
@@ -116,6 +190,7 @@ class BedRobot:
     def movej_to(self, point, slow=False):
         """교시한 위치로 이동. 관절각(posj)이 있으면 movej, 없으면(팀원 파일처럼 posx 만 있으면) posx 로 직선 이동."""
         self.require_standby(point['name'])
+        self._begin(f'[{point["name"]}] 이동', point.get('posx'))
         if not point.get('posj'):
             vel, acc = (cfg.VELX_SLOW, cfg.ACCX_SLOW) if slow else (cfg.TEACH_VELX, cfg.TEACH_ACCX)
             self._done(self.dr.movel(self.posx([float(v) for v in point['posx']]), vel=vel, acc=acc,
@@ -130,6 +205,9 @@ class BedRobot:
         if abs(dz) < 1e-3:
             return
         self.require_standby('수직 이동')
+        self._begin(f'수직 이동 {dz:+.1f} mm')
+        if self._mv[0]:
+            self._mv = (self._mv[0], self._mv[0][:2] + [self._mv[0][2] + float(dz)], self._mv[2])
         ret = self.dr.movel(self.posx([0.0, 0.0, float(dz), 0.0, 0.0, 0.0]),
                             vel=cfg.VELX if vel is None else vel, acc=cfg.ACCX if acc is None else acc,
                             ref=self.dr.DR_BASE, mod=self.dr.DR_MV_MOD_REL)
@@ -138,6 +216,7 @@ class BedRobot:
     def movel_to(self, pose, vel, acc, what):
         """베이스 기준 절대 좌표 pose(posx 6개)로 직선 이동."""
         self.require_standby(what)
+        self._begin(what, pose)
         ret = self.dr.movel(self.posx([float(v) for v in pose]), vel=vel, acc=acc,
                             ref=self.dr.DR_BASE, mod=self.dr.DR_MV_MOD_ABS)
         self._done(ret, what)
@@ -169,6 +248,7 @@ class BedRobot:
         돌려주는 값: (이동 중 최대 외력 [N], 기준값 f0).
         """
         self.require_standby(what)
+        self._begin(what, end)
         peak = 0.0
         if compliance is not None:
             if self.dr.task_compliance_ctrl(list(compliance)) != 0:
@@ -201,7 +281,10 @@ class BedRobot:
                 # 명령 직후 아직 출발 전이라 IDLE 로 보일 수 있으므로, 움직이는 것을 한 번 봤거나 1초가 지나야 끝으로 본다
                 if st == self.dr.DR_STATE_IDLE and (seen_busy or time.monotonic() - t0 > 1.0):
                     break
-                if st == -1 or self.state() not in (STATE_STANDBY, 2):      # 2 = MOVING
+                s = self.state()
+                if s in COLLISION_STATES:
+                    raise self._collision(what, s)
+                if st == -1 or s not in (STATE_STANDBY, 2):      # 2 = MOVING
                     raise BedError(f'{what} 중 로봇이 멈췄습니다. {self.fault_text()}')
                 time.sleep(poll)
         finally:
@@ -218,6 +301,82 @@ class BedRobot:
             raise BedError(f'{what}: 끝난 위치가 목표에서 {err:.1f}mm 벗어났습니다 (허용 {end_tol:.0f}mm). '
                            '그리퍼는 잡은 채로 두었습니다.')
         return peak, f0
+
+    def robot_control(self, code):
+        """system/set_robot_control (2 = SAFE_STOP 해제, 3 = SAFE_OFF 해제/서보 켜기)."""
+        import rclpy
+        from dsr_msgs2.srv import SetRobotControl
+        if self._ctl_cli is None:
+            self._ctl_cli = self.node.create_client(SetRobotControl, self.dr._srv_name_prefix + 'system/set_robot_control')
+            self._ctl_cli.wait_for_service(timeout_sec=3.0)
+        req = SetRobotControl.Request()
+        req.robot_control = code
+        fut = self._ctl_cli.call_async(req)
+        rclpy.spin_until_future_complete(self.node, fut, timeout_sec=3.0)
+
+    def wait_still(self, what, tol=None, hold=None, timeout=None):
+        """흔들림이 없어질 때까지 기다린다: 현재 위치(서비스로 읽음)가 hold 초 동안 tol mm 안에서만 움직이면 안정.
+        timeout 안에 안정되지 않으면 BedError. 돌려주는 값: 기다린 시간 [s]."""
+        tol = cfg.COLLISION_STILL_TOL if tol is None else tol
+        hold = cfg.COLLISION_STILL_HOLD if hold is None else hold
+        timeout = cfg.COLLISION_STILL_TIMEOUT if timeout is None else timeout
+        t0 = time.monotonic()
+        win = []                                # (시각, xyz)
+        while True:
+            ev = getattr(self, 'stop_event', None)
+            if ev is not None and ev.is_set():
+                raise BedStop()
+            now = time.monotonic()
+            try:
+                xyz = self.cur_xyz()
+            except BedError:
+                xyz = None
+            if xyz is not None:
+                win.append((now, xyz))
+                win = [(t, p) for t, p in win if now - t <= hold]
+                span = max(max(p[i] for _, p in win) - min(p[i] for _, p in win) for i in range(3))
+                if now - t0 >= hold and win[0][0] <= now - hold + 0.15 and span <= tol:
+                    self.log(f'  {what}: 안정됨 ({now - t0:.1f}s, 흔들림 {span:.2f}mm)')
+                    return now - t0
+            if now - t0 > timeout:
+                raise BedError(f'{what}: {timeout:g}초 안에 로봇이 안정되지 않았습니다. 주변을 확인하세요.')
+            time.sleep(0.1)
+
+    def recover_collision(self, col, dist):
+        """충돌 복구 (모두 서비스로 요청하고 응답·상태를 확인):
+        흔들림이 멎을 때까지 대기 → 보호 정지 해제(set_robot_control) → STANDBY 확인 → 다시 안정 대기
+        → 충돌 반대 방향으로 dist mm 천천히 후퇴 → 다시 안정 대기. 돌려주는 값: 후퇴 방향(단위 벡터)."""
+        self.check_stop()                       # 비상정지/정지가 눌렸으면 복구하지 않는다 (서보를 다시 켜지 않음)
+        self.wait_still('충돌 후 정지')
+        end = time.monotonic() + 15.0
+        while time.monotonic() < end:
+            self.check_stop()
+            s = self.state()
+            if s == STATE_STANDBY:
+                break
+            if s in (3, 10):
+                self.robot_control(3)               # SAFE_OFF → 서보 켜기
+            elif s in (5, 9):
+                self.robot_control(2)               # SAFE_STOP → STANDBY
+            elif s == 6:
+                raise BedError('비상정지 버튼이 눌려 있습니다. 해제한 뒤 다시 시작하세요.')
+            time.sleep(0.5)
+        if self.state() != STATE_STANDBY:
+            raise BedError(f'충돌 후 보호 정지를 풀지 못했습니다. {self.fault_text()} → 펜던트에서 복구하세요.')
+        if self.dr.get_robot_mode() != self.dr.ROBOT_MODE_AUTONOMOUS:
+            self.dr.set_robot_mode(self.dr.ROBOT_MODE_AUTONOMOUS)
+        self.log('  보호 정지 해제 → STANDBY 확인')
+        self.wait_still('보호 정지 해제 후')
+        d = col.retreat_dir()
+        if dist > 0:
+            self._mv = (None, None, '충돌 후 후퇴')
+            ret = self.dr.movel(self.posx([d[0] * dist, d[1] * dist, d[2] * dist, 0.0, 0.0, 0.0]),
+                                vel=cfg.COLLISION_BACKOFF_VEL, acc=cfg.COLLISION_BACKOFF_ACC,
+                                ref=self.dr.DR_BASE, mod=self.dr.DR_MV_MOD_REL)
+            if ret != 0 or self.state() != STATE_STANDBY:
+                raise BedError(f'충돌 후 반대 방향 후퇴 실패. {self.fault_text()}')
+            self.wait_still('후퇴 후')
+        return d
 
     def halt(self):
         """지금 동작을 빠르게 정지 (DR_QSTOP, 서보는 켜진 채)."""
@@ -237,6 +396,7 @@ class BedRobot:
         움직이는 중의 힘 추정에는 관절 마찰이 섞일 수 있다 → 잘못 멈춰도 부르는 쪽이 계단식으로 다시 확인한다.
         """
         self.require_standby('탐색 하강')
+        self._begin('탐색 하강')
         z_end = self.cur_z() - dist
         ret = self.dr.amovel(self.posx([0.0, 0.0, -float(dist), 0.0, 0.0, 0.0]), vel=vel, acc=acc,
                              ref=self.dr.DR_BASE, mod=self.dr.DR_MV_MOD_REL)
@@ -280,6 +440,7 @@ class BedRobot:
     def movec(self, via, end, vel, acc):
         """지금 위치 → via → end 를 지나는 원호 이동 (posx 사용: 교시 때와 TCP 가 같아야 함)."""
         self.require_standby('원호 이동')
+        self._begin(f'원호 이동 [{via["name"]} → {end["name"]}]', end.get('posx'))
         ret = self.dr.movec(self.posx(list(via['posx'])), self.posx(list(end['posx'])),
                             vel=vel, acc=acc, ref=self.dr.DR_BASE)
         self._done(ret, f'원호 이동 [{via["name"]} → {end["name"]}]')
@@ -356,7 +517,7 @@ class BedRobot:
             req = SetCommand.Request()
             # 'c' 완전히 닫기, 'o' 완전히 열기, 숫자는 1/10 mm 단위 폭 (실제 OnRobot 드라이버)
             req.command = 'c' if width <= 0 else 'o' if width >= 110 else str(int(round(width * 10)))
-            if self.emu is not None and req.command not in ('c', 'o'):
+            if (self.emu is not None or cfg.VIRTUAL) and req.command not in ('c', 'o'):   # 가상(RViz) 그리퍼도 각도로 받음
                 # 에뮬레이터의 가상 그리퍼(gripper_virtual_node)는 숫자를 손가락 관절각[rad]으로 받는다
                 # (열림 -0.5585 ~ 닫힘 0.7854). 폭 mm 를 그 범위로 바꿔야 RViz 에서 벌어지고 닫히는 게 보인다
                 req.command = f'{0.785398 - (0.785398 + 0.558505) * width / 110.0:.4f}'

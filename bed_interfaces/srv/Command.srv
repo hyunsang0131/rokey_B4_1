@@ -1,0 +1,6 @@
+# 공정 명령 (HMI → cushion_bridge → bed_process). 2026-11-20: 토픽 대신 서비스로 받았다는 응답을 확인한다.
+string command      # JSON, 예: {"cmd": "stop"} / {"cmd": "start", "mode": "repair"} / {"cmd": "continue"}
+---
+bool accepted       # 받아서 처리했으면 true (실행 중이라 무시 등은 false)
+string message      # 사람이 읽는 설명
+string state        # 응답 시점의 공정 상태 (idle / running / confirm / ...)

@@ -27,8 +27,8 @@ setup(
             'cover_demo = bed_inspect.cover_demo:main',     # 커버 열기/닫기만 따로 (RViz 확인용)
             'emu_teach = bed_inspect.emu_teach:main',
             'cushion_bridge = bed_inspect.cushion_bridge:main',
+            'string_v1 = bed_inspect.string_v1_demo:main', # 실 고정 v1: 영상 전 (30/20, 180도)
             'bed_cmd = bed_inspect.bed_cmd:main',             # 터미널에서 공정 명령 (inspect / order / ...)   # cushion_hmi 화면/웹 주문 ↔ 공정 연결       # 에뮬레이터(sodvir)용 가짜 교시 파일 만들기
-            'string_v2 = bed_inspect.string_v2_demo:main',  # 나사로 실 고정/고정해제 v2 (높이 올려 장력 찾고 크게 돌기, 330도 조이기)
         ],
     },
 )

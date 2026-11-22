@@ -711,7 +711,7 @@ def grid_neighbors(i, rows, cols):
     return out
 
 
-def find_empties(blocks, empty_dz, tall_dz=None):
+def find_empties(blocks, empty_dz, tall_dz=None, z_ref=None):
     """빈칸과 높은 큐브 찾기. blocks 의 각 dict 에 'grade' 를 'empty' / 'nodata' / None(아직 모름) 으로 채운다.
 
     기준 높이 = 강성을 잰 칸들의 표면 높이 중앙값 (보통 높이 큐브가 대부분이라는 가정).
@@ -721,10 +721,13 @@ def find_empties(blocks, empty_dz, tall_dz=None):
     그 밖의 오류로 강성을 못 잰 칸은 'nodata'.
     반환: 빈칸 번호 목록 (0부터)
     """
-    surf = [b['z_surf'] for b in blocks if b.get('k') is not None and b.get('z_surf') is not None]
-    if not surf:
-        surf = [b['z0'] for b in blocks if b.get('z0') is not None]
-    z_ref = statistics.median(surf) if surf else None
+    if z_ref is None:
+        # z_ref 를 주면 그것을 보통 큐브 윗면 높이로 쓴다 (11-22: 트레이에 큐브가 한 개뿐이면 그 큐브가 기준이 돼
+        # 높은 큐브를 못 알아봤음 → 침대 높이에서 옮겨 온 기준을 넘김)
+        surf = [b['z_surf'] for b in blocks if b.get('k') is not None and b.get('z_surf') is not None]
+        if not surf:
+            surf = [b['z0'] for b in blocks if b.get('z0') is not None]
+        z_ref = statistics.median(surf) if surf else None
     out = []
     for i, b in enumerate(blocks):
         b['ref'] = b['ref_src'] = b['dev'] = None
@@ -850,6 +853,96 @@ def plan_profile(todo, profile, cands, centers):
         raise PlanError('보관대에 원하는 큐브가 모자랍니다: '
                         + ', '.join(f'{i + 1}번({names[profile[i]]})' for i in short))
     return assign
+
+
+def plan_profile_moves(bed, tray, profile, centers=None):
+    """주문(사용자 지정) 이동 계획: 침대 안의 큐브도 다른 칸으로 옮겨 쓴다 (2026-11-20 형님: 침대에 부드러운 큐브가
+    다 있고 자리만 바꾸면 되는데 트레이에서만 찾다가 '모자람' → 탐색하러 감).
+
+    bed, tray: 칸마다 None(빈칸) 또는 {'cls': 'soft'|'hard'|'tall'|None, 'h': 높이, 'k': 침대 기준 강성}.
+    profile[i]: 침대 i번 칸에 원하는 종류. 이미 맞는 칸은 건드리지 않는다.
+    채울 칸마다 원하는 종류의 큐브를 침대의 '맞지 않는 칸'에서 먼저 가져오고(옮긴 자리는 다시 채울 칸이 됨), 없으면 트레이에서
+    (그 종류 대표 강성에 가장 가까운 것). 채울 칸에 다른 큐브가 있으면 먼저 트레이 빈 자리로 뺀다.
+    반환: (moves [{'src', 'dst', 'h'}], choice [{'slot': 칸, 'from': ('bed'|'rack', 번호)}]). 종류가 모자라면 PlanError.
+    """
+    bed, tray = [None if c is None else dict(c) for c in bed], [None if c is None else dict(c) for c in tray]
+    n = len(bed)
+    # 이미 맞는 칸, 그리고 측정 실패라 종류를 모르는 칸('keep')은 건드리지 않는다
+    done = [bed[i] is not None and (bed[i].get('cls') == profile[i] or bool(bed[i].get('keep'))) for i in range(n)]
+
+    # 종류별로 모자라는지 먼저 본다 (침대의 맞지 않는 큐브 + 트레이 큐브)
+    names = {'hard': '단단한', 'soft': '부드러운', 'tall': '높은'}
+    have = {}
+    for i in range(n):
+        if bed[i] is not None and not done[i] and bed[i].get('cls'):
+            have[bed[i]['cls']] = have.get(bed[i]['cls'], 0) + 1
+    for c in tray:
+        if c is not None and c.get('cls'):
+            have[c['cls']] = have.get(c['cls'], 0) + 1
+    need = {}
+    for i in range(n):
+        if not done[i]:
+            need[profile[i]] = need.get(profile[i], 0) + 1
+    short = [w for w in need if need[w] > have.get(w, 0)]
+    if short:
+        raise PlanError('침대와 보관대를 합쳐도 원하는 큐브가 모자랍니다: '
+                        + ', '.join(f'{names.get(w, w)} {need[w] - have.get(w, 0)}개' for w in short))
+
+    def tray_pick(w):
+        pool = [j for j, c in enumerate(tray) if c is not None and c.get('cls') == w]
+        if not pool:
+            return None
+        ref = (centers or {}).get(w)
+        return min(pool, key=lambda j: (abs(math.log(tray[j]['k'] / ref)) if ref and tray[j].get('k') else 0.0, j))
+
+    moves, choice = [], []
+
+    def move(src, dst):
+        (sk, si), (dk, di) = src, dst
+        sl = bed if sk == 'bed' else tray
+        cube = sl[si]
+        sl[si] = None
+        (bed if dk == 'bed' else tray)[di] = cube
+        moves.append({'src': src, 'dst': dst, 'h': cube.get('h')})
+
+    for _ in range(4 * n + 10):
+        todo = [i for i in range(n) if not done[i]]
+        if not todo:
+            return moves, choice
+        filled = False
+        # 1) 비어 있는 채울 칸에 원하는 종류를 넣는다: 침대의 맞지 않는 큐브 먼저, 없으면 트레이
+        for i in todo:
+            if bed[i] is not None:
+                continue
+            w = profile[i]
+            src = next((('bed', j) for j in range(n)
+                        if j != i and not done[j] and bed[j] is not None and bed[j].get('cls') == w), None)
+            if src is None:
+                j = tray_pick(w)
+                src = None if j is None else ('rack', j)
+            if src is not None:
+                move(src, ('bed', i))
+                done[i] = True
+                choice.append({'slot': i, 'from': src})
+                filled = True
+                break
+        if filled:
+            continue
+        # 2) 채울 칸이 모두 다른 큐브로 막혀 있다 → 하나를 트레이 빈 자리로 뺀다 (원하는 종류를 구할 수 있는 칸부터)
+        blocked = [i for i in todo if bed[i] is not None]
+        if not blocked:
+            break
+        e = next((j for j, c in enumerate(tray) if c is None), None)
+        if e is None:
+            raise PlanError('맞지 않는 큐브를 잠깐 둘 보관대 빈 자리가 없습니다. 보관대에 빈 자리를 1개 이상 만드세요.')
+
+        def obtainable(i):
+            w = profile[i]
+            return (any(j != i and not done[j] and bed[j] is not None and bed[j].get('cls') == w for j in range(n))
+                    or tray_pick(w) is not None)
+        i = next((i for i in blocked if obtainable(i)), blocked[0])
+        move(('bed', i), ('rack', e))
+    raise PlanError('이동 순서를 만들지 못했습니다.')
 
 
 def plan_repair_moves(bed, rack, assign, mismatches):

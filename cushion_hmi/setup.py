@@ -13,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        ('share/' + package_name + '/web', ['bed_ordering.html']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,7 +28,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'hmi = cushion_hmi.hmi:main',
+            'hmi = cushion_hmi.hmi_coop1:main',           # 새 운전화면 (2026-11-20, test 브랜치 cushion_hmi.pyqty + 공정 연동)
+            'hmi_classic = cushion_hmi.hmi:main',        # 예전 화면
+            'hmi_demo = cushion_hmi.hmi_coop1:demo',     # 새 화면 시연 (ROS 없이)
             'mock_mission = cushion_hmi.mock_mission:main',
             'order_server = cushion_hmi.order_server:main',
         ],

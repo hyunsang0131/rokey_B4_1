@@ -52,7 +52,8 @@ IDLE_STATES = ('idle', 'done', 'warning', 'stopped')
 
 
 def order_to_profile(order, slot_map):
-    """웹 주문 {"slots": {"Slot 1": "부드러움", ...}} → 공정 칸 순서의 profile ['soft', 'hard', ...]."""
+    """웹 주문 {"slots": {"Slot 1": "부드러움" 또는 {"stiffness": "부드러움", "height": "HIGH"}, ...}}
+    → 공정 칸 순서의 profile ['soft', 'hard', 'tall', ...]. 높이 HIGH = 'tall' (키 큰 무른 큐브)."""
     slots = order.get('slots')
     if not isinstance(slots, dict):
         raise ValueError('slots 가 없습니다')
@@ -60,6 +61,8 @@ def order_to_profile(order, slot_map):
     profile = [None] * n
     for i in range(n):
         v = slots.get(f'Slot {i + 1}')
+        if isinstance(v, dict):                     # 새 형식 {'stiffness': '부드러움', 'height': 'HIGH'}
+            v = 'tall' if v.get('height') == 'HIGH' else v.get('stiffness')
         if v not in ORDER_PROFILE:
             raise ValueError(f'Slot {i + 1} 값이 이상합니다: {v!r}')
         profile[slot_map[i] - 1] = ORDER_PROFILE[v]
@@ -88,6 +91,8 @@ def cmd_for(mode, profile):
 def hmi_mode(bed):
     """공정 status 의 mode → HMI 모드 이름."""
     m = bed.get('mode')
+    if m == 'repair' and bed.get('target') == 'user':     # 주문 모드: 계획이 서기 전(침대 측정 중)부터 주문 모드로 표시
+        return 'order'
     if m == 'measure':
         return 'diagnose'
     if m == 'replace':
@@ -142,6 +147,9 @@ def to_cushion_status(bed, slot_map, order=None, pending=False):
         'step': step, 'step_name': bed.get('step_name') or '', 'detail': bed.get('detail') or '',
     }
     out['bed_map'], out['tray_map'] = map_cells(bed.get('map'))
+    out['current_rack'] = bed.get('active_rack') if running else None      # 지금 누르는 트레이 칸 (1~6)
+    out['current_move'] = bed.get('active_move') if running else None      # 옮기는 중 {'src': [종류, 번호], 'dst': ...}
+    out['emergency'] = bed.get('emergency')      # 예외 상황 (충돌 긴급 프로토콜 / 재고 부족 큐브 탐색)
     if order:
         out['order'] = {'order_id': order.get('order_id'), 'pending': pending}
     return out
@@ -149,29 +157,38 @@ def to_cushion_status(bed, slot_map, order=None, pending=False):
 
 def map_cells(m, ratio=0.75):
     """공정의 강성 맵 → 화면용 칸 목록 [{'type': 'S'|'H'|'T'|'E'|'?', 'k': ...}] (침대, 트레이). 맵이 없으면 None.
-    S/H 는 침대+트레이 강성을 두 무리로 나눠(비율 ratio) 정한다. T = z 로 높다고 판별된 큐브, E = 빈칸."""
+    S/H 는 공정이 판정해 맵에 적은 'soft' 를 그대로 쓴다 (화면과 공정 판정이 항상 같게).
+    판정 전인 칸만 그 쪽(침대 또는 트레이) 강성끼리 두 무리로 나눠 정한다 (침대·트레이는 측정 조건이 달라 섞지 않음).
+    T = z 로 높다고 판별된 큐브, E = 빈칸."""
     if not m:
         return None, None
     from bed_inspect import bed_math
-    cells = [c for side in ('bed', 'tray') for c in (m.get(side) or [])]
-    thr = bed_math.split_classes([c['k'] for c in cells if c.get('k') and not c.get('tall')], 1.0 / ratio)
 
-    def one(c):
-        if c.get('empty'):
-            t = 'E'
-        elif c.get('tall'):
-            t = 'T'
-        elif c.get('too_soft'):
-            t = 'S'
-        elif c.get('k') and thr:
-            t = 'S' if c['k'] < thr else 'H'
-        elif c.get('k'):
-            t = 'H'
-        else:
-            t = '?'
-        return {'type': t, 'k': c.get('k')}
-    return ([one(c) for c in m['bed']] if m.get('bed') else None,
-            [one(c) for c in m['tray']] if m.get('tray') else None)
+    def side_cells(cells):
+        if not cells:
+            return None
+        thr = bed_math.split_classes([c['k'] for c in cells if c and c.get('k') and not c.get('tall')], 1.0 / ratio)
+
+        def one(c):
+            if c is None:                   # 예외 상황 2 로 블록을 넣고 아직 안 잰 칸
+                return {'type': '?', 'k': None}
+            if c.get('empty'):
+                t = 'E'
+            elif c.get('tall'):
+                t = 'T'
+            elif 'soft' in c:
+                t = 'S' if c['soft'] else 'H'
+            elif c.get('too_soft'):
+                t = 'S'
+            elif c.get('k') and thr:
+                t = 'S' if c['k'] < thr else 'H'
+            elif c.get('k'):
+                t = 'H'
+            else:
+                t = '?'
+            return {'type': t, 'k': c.get('k')}
+        return [one(c) for c in cells]
+    return side_cells(m.get('bed')), side_cells(m.get('tray'))
 
 
 class CushionBridge:
@@ -198,6 +215,18 @@ class CushionBridge:
         node.create_subscription(String, '/bed/curve', self.on_bed_curve, 20)
         self.pub_force = node.create_publisher(String, TOPIC_FORCE, 200)
         node.create_subscription(String, TOPIC_CMD, self.on_hmi_cmd, 10)
+        # 서비스 (2026-11-20 형님): HMI → /cushion/command → (변환) → /bed/command → bed_process, 응답을 되돌려 준다
+        try:
+            from bed_interfaces.srv import Command
+        except ImportError:                 # bed_interfaces 를 빌드/소스 안 한 터미널: 토픽만으로 동작
+            Command = None
+            self.say('bed_interfaces 가 없어 명령 서비스 없이 토픽만 씁니다. source install/setup.bash 를 다시 하세요.')
+        self._Command, self.bed_cli = Command, None
+        if Command is not None:
+            from rclpy.callback_groups import ReentrantCallbackGroup
+            self._cg = ReentrantCallbackGroup()
+            self.bed_cli = node.create_client(Command, '/bed/command', callback_group=self._cg)
+            node.create_service(Command, '/cushion/command', self.on_hmi_cmd_srv, callback_group=self._cg)
         node.create_subscription(String, TOPIC_ORDER, self.on_order, 10)
         node.create_timer(0.5, self.publish_status)
         self.say(f'cushion_bridge 시작 (주문 자동 시작 {"켬" if self.auto_start else "끔"}, 칸 대응 {self.slot_map})')
@@ -207,8 +236,39 @@ class CushionBridge:
         self.log.info(text)
         self.pub_log.publish(String(data='[연결] ' + text))
 
-    def send_bed(self, cmd):
-        self.pub_bed.publish(String(data=json.dumps(cmd, ensure_ascii=False)))
+    def send_bed(self, cmd, timeout=3.0, wait=False):
+        """공정에 명령: /bed/command 서비스로 보내고 응답을 받는다. wait=True 면 응답까지 기다려 (받았나, 설명, 상태).
+        서비스가 없으면(예전 공정) 토픽 /bed/cmd 로 보낸다."""
+        text = json.dumps(cmd, ensure_ascii=False)
+        if self.bed_cli is None or not self.bed_cli.service_is_ready():
+            self.pub_bed.publish(String(data=text))
+            return (None, '공정 서비스(/bed/command)가 없어 토픽으로 보냈습니다 (응답 확인 못 함)', '')
+        req = self._Command.Request()
+        req.command = text
+        fut = self.bed_cli.call_async(req)
+        if not wait:
+            def done(f):
+                r = f.result()
+                if r is not None and not r.accepted:
+                    self.say(f'공정이 명령을 받지 않음: {r.message}')
+            fut.add_done_callback(done)
+            return (None, '보냄', '')
+        ev = threading.Event()
+        fut.add_done_callback(lambda f: ev.set())
+        if not ev.wait(timeout):
+            return (False, f'공정이 {timeout:g}초 안에 응답하지 않았습니다', '')
+        r = fut.result()
+        return (bool(r.accepted), r.message, r.state) if r is not None else (False, '응답 없음', '')
+
+    def on_hmi_cmd_srv(self, req, res):
+        try:
+            d = json.loads(req.command)
+        except ValueError:
+            res.accepted, res.message = False, f'명령을 읽지 못했습니다: {req.command!r}'
+            return res
+        res.accepted, res.message, res.state = self.handle_hmi(d, wait=True)
+        res.accepted = bool(res.accepted)
+        return res
 
     def publish_status(self):
         with self.lock:
@@ -259,24 +319,46 @@ class CushionBridge:
             d = json.loads(msg.data)
         except ValueError:
             return
+        self.handle_hmi(d)
+
+    def handle_hmi(self, d, wait=False):
+        """HMI 명령 → 공정 명령. (받았나, 설명, 상태) — wait=False(토픽)면 결과를 기다리지 않는다."""
         c = d.get('cmd')
         if c == 'start':
+            profile = self.profile
+            if d.get('order'):                      # HMI 주문 대기열에서 고른 주문 ("제작 실행")
+                try:
+                    profile = order_to_profile(d['order'], self.slot_map)
+                except (ValueError, AttributeError) as e:
+                    self.say(f'시작 못 함: 주문을 읽지 못했습니다: {e}')
+                    return False, f'주문을 읽지 못했습니다: {e}', ''
+                with self.lock:
+                    self.order, self.profile = d['order'], profile
+                self.pub_last.publish(String(data=json.dumps(d['order'], ensure_ascii=False)))
             try:
-                cmd = cmd_for(d.get('mode', 'full'), self.profile)
+                cmd = cmd_for(d.get('mode', 'full'), profile)
             except ValueError as e:
                 self.say(f'시작 못 함: {e}')
-                return
+                return False, str(e), ''
             self.say(f'HMI 시작 → 공정 {cmd}')
-            self.send_bed(cmd)
-        elif c == 'stop':
+            return self.send_bed(cmd, wait=wait)
+        if c == 'stop':
             with self.lock:
                 self.pending = False
-            self.send_bed({'cmd': 'stop'})
-        elif c == 'continue':
-            if (self.bed or {}).get('state') == 'confirm':
-                self.send_bed({'cmd': 'confirm'})
-        elif c == 'reset':
+            return self.send_bed({'cmd': 'stop'}, wait=wait)
+        if c in ('estop', 'estop_reset'):         # HMI 비상정지 / 해제 → 공정이 로봇에 빠른 정지+서보 끄기 / 서보 켜기
+            with self.lock:
+                self.pending = False
+            self.say('HMI 비상정지' if c == 'estop' else 'HMI 비상정지 해제')
+            return self.send_bed({'cmd': c}, wait=wait, timeout=1.5)
+        if c == 'continue':
+            return self.send_bed({'cmd': 'confirm'}, wait=wait)
+        if c == 'cancel':
+            return self.send_bed({'cmd': 'cancel'}, wait=wait)
+        if c == 'reset':
             self.say('초기화: 공정에는 명령을 보내지 않습니다 (재고는 bed_hmi 의 재고 수정에서 바꿉니다).')
+            return True, '초기화 (공정에는 보내지 않음)', ''
+        return False, f'알 수 없는 명령: {c}', ''
 
     def on_order(self, msg):
         try:
@@ -317,8 +399,12 @@ def main(args=None):
     rclpy.init(args=args)
     node = Node('cushion_bridge')
     CushionBridge(node)
+    # 서비스 콜백 안에서 공정 서비스 응답을 기다리므로 여러 스레드로 돈다
+    from rclpy.executors import MultiThreadedExecutor
+    ex = MultiThreadedExecutor(num_threads=4)
+    ex.add_node(node)
     try:
-        rclpy.spin(node)
+        ex.spin()
     except KeyboardInterrupt:
         pass
     finally:

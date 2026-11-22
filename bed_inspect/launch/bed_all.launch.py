@@ -1,7 +1,7 @@
 # 명령 하나로 전부: 로봇 bringup → 공정·연결·주문 서버·화면 → 고른 작업을 9단계 파이프라인으로 실행
 #
 #   작업 job:=inspect   공정 전체: 측정 → 판정 → 커버 열기 → 교체 → 커버 닫기 → 재측정 → 확인 (자동 보수)
-#   작업 job:=order     주문대로 구성: 웹 주문(http://<이 PC IP>:5000/)을 기다렸다가 → 같은 9단계로 주문대로 교체
+#   작업 job:=order     주문대로 구성: 주문 웹페이지가 같이 열림 → 주문은 HMI 대기열에 예약 → HMI '제작 실행' 을 눌러야 9단계 시작
 #                       (order_file:=주문.json 을 주면 웹 대신 그 파일로 바로)
 #   로봇 robot:=virtual (에뮬레이터 + RViz)  /  robot:=real (실물, teach_file 필요)
 #
@@ -24,7 +24,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo,
-                            OpaqueFunction, RegisterEventHandler)
+                            OpaqueFunction, RegisterEventHandler, TimerAction)
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
@@ -97,12 +97,21 @@ def _setup(context):
             cmd.append('--replace')
         after.append(ExecuteProcess(cmd=cmd, output='screen', name='job_inspect'))
     elif job == 'order':
-        cmd = ['ros2', 'run', 'bed_inspect', 'bed_cmd', 'order', '--ready-timeout', '180']
-        if get('order_file'):
-            cmd.insert(5, os.path.expanduser(get('order_file')))
+        if get('order_file'):                           # 파일 주문: 바로 실행
+            cmd = ['ros2', 'run', 'bed_inspect', 'bed_cmd', 'order', os.path.expanduser(get('order_file')),
+                   '--ready-timeout', '180']
+            after.append(ExecuteProcess(cmd=cmd, output='screen', name='job_order'))
         else:
-            cmd.append('--wait')                        # 켠 뒤에 들어오는 웹 주문을 기다린다
-        after.append(ExecuteProcess(cmd=cmd, output='screen', name='job_order'))
+            # 웹 주문은 바로 시작하지 않는다 (2026-11-20 형님): HMI '고객 주문 사항' 대기열에 쌓이고,
+            # 사람이 고른 주문을 '제작 실행' 으로 눌러야 그때 9단계 시작. 하나 끝나도 다음 주문은 누를 때까지 기다림.
+            after.append(LogInfo(msg='[주문 모드] 웹 주문은 HMI 주문 대기열에 쌓입니다. HMI 에서 주문을 고르고 "제작 실행" 을 누르세요.'))
+            # 주문 웹페이지도 같이 연다 (2026-11-20 형님). 여기서 주문하면 HMI(주문 서버 127.0.0.1:5000) → 공정으로 간다
+            page = os.path.join(get_package_share_directory('cushion_hmi'), 'web', 'bed_ordering.html')
+            if os.path.exists(page):
+                after.append(TimerAction(period=3.0, actions=[ExecuteProcess(
+                    cmd=['xdg-open', page], output='log', name='order_page')]))
+            else:
+                after.append(LogInfo(msg=f'주문 웹페이지가 없습니다: {page} (cushion_hmi 를 다시 빌드하세요)'))
     wait = ExecuteProcess(cmd=['ros2', 'run', 'bed_inspect', 'bed_cmd', 'wait_robot', '--ready-timeout', '180'],
                           output='screen', name='wait_robot')
 

@@ -47,3 +47,20 @@ def test_order_tall_from_web():
     order = {'order_id': 'TW-1', 'slots': {'Slot 1': '높게', 'Slot 2': '높게', 'Slot 3': '단단함',
                                            'Slot 4': '단단함', 'Slot 5': '부드러움', 'Slot 6': '단단함'}}
     assert cb.order_to_profile(order, [1, 2, 3, 4, 5, 6]) == ['tall', 'tall', 'hard', 'hard', 'soft', 'hard']
+
+
+def test_order_new_dict_format():
+    """test 브랜치 새 웹/HMI 형식: {'stiffness', 'height'} (HIGH = 키 큰 무른 큐브)."""
+    slots = {f'Slot {i}': {'stiffness': '단단함', 'height': 'NORMAL'} for i in range(1, 7)}
+    slots['Slot 2'] = {'stiffness': '부드러움', 'height': 'HIGH'}
+    slots['Slot 5'] = {'stiffness': '부드러움', 'height': 'NORMAL'}
+    assert cb.order_to_profile({'slots': slots}, [1, 2, 3, 4, 5, 6]) == ['hard', 'tall', 'hard', 'hard', 'soft', 'hard']
+
+
+def test_map_cells_uses_process_judgement_per_side():
+    """침대(천 위)와 트레이(맨 큐브)는 강성 크기가 달라도 공정 판정(soft)대로 색을 정한다."""
+    m = {'bed': [{'k': 11, 'soft': False}, {'k': 7, 'soft': True}, {'empty': True}],
+         'tray': [{'k': 4, 'soft': True}, {'k': 10, 'soft': False}, {'k': 9}]}
+    bed, tray = cb.map_cells(m)
+    assert [c['type'] for c in bed] == ['H', 'S', 'E']
+    assert [c['type'] for c in tray] == ['S', 'H', 'H']
